@@ -1,0 +1,6 @@
+target/
+*.part
+*.log
+# Local settings and secrets
+.env
+*.key

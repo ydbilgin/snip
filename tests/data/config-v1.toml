@@ -1,0 +1,29 @@
+# snip settings (Laureth). Every key is optional; delete the file to get these defaults back.
+# Read once at start; restart snip after a change (snip quit, then start it again).
+
+# Take Win+Shift+S (in-process low-level keyboard hook; Win+Shift+R stays with Snipping Tool).
+win_shift_s = true
+# Also snip on a plain PrtScn key (no hook needed).
+print_screen = true
+# Send one harmless key after Win+Shift+S so releasing Win does not open Start.
+mask_win_key = true
+# Folder for the PNGs. Empty = Windows' Screenshots folder.
+folder = ""
+save_file = true
+copy_to_clipboard = true
+# auto = Desktop Duplication, then Windows.Graphics.Capture, then GDI. Or: dd, wgc, gdi.
+capture = "auto"
+# Keep the graphics device between snips: about 15-90 ms faster to open, more memory while idle.
+keep_gpu_device = false
+# Run each snip in a short-lived child process (the tray process then stays at about 2 MB).
+separate_process = true
+# Create the graphics device while Win+Shift are held, before S (dropped again after 10 s unused).
+prewarm = true
+# Darkening outside the selection (0.0 to 0.9).
+dim = 0.45
+# Re-install the keyboard hook this often, in minutes.
+rearm_minutes = 10
+# The overlay closes itself after this many seconds without input.
+overlay_timeout_seconds = 300
+# Step timings in %LOCALAPPDATA%\Laureth\snip\snip.log
+debug_log = true

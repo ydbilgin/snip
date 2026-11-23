@@ -1,0 +1,56 @@
+name: Bug report
+description: Something does not work as described.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting. `snip status` and the last lines of `snip.log` usually say most of what is needed.
+  - type: input
+    id: version
+    attributes:
+      label: snip version
+      description: Output of `snip --version` (or the commit you built).
+      placeholder: snip 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Press Win+R, run `winver`, and copy the version and build.
+      placeholder: Windows 11 24H2 (build 26100.xxxx)
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Monitors and scaling
+      description: Number of monitors, their resolutions and scaling, and any non-default config.toml keys.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start snip
+        2. Press Win+Shift+S
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: snip status / log lines
+      description: Output of `snip status` and the relevant lines of `%LOCALAPPDATA%\Laureth\snip\snip.log`. Remove anything personal (file names, user names) first.
+      render: text

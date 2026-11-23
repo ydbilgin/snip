@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0A0F15"/><stop offset="1" stop-color="#111A24"/></linearGradient>
+<pattern id="grid" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#FFFFFF" stroke-opacity="0.03"/></pattern>
+<clipPath id="screen"><rect x="704" y="56" width="488" height="288" rx="10"/></clipPath>
+</defs>
+<rect width="1280" height="400" rx="20" fill="url(#bg)"/>
+<rect width="1280" height="400" rx="20" fill="url(#grid)"/>
+<image x="86" y="84" width="76" height="76" href="data:image/png;base64,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"/>
+<text x="180" y="150" font-family="Cascadia Code, Consolas, SFMono-Regular, Menlo, monospace" font-size="96" font-weight="700" letter-spacing="-2" fill="#F0F6FC">snip</text>
+<g font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="30" fill="#AAB6C2">
+<text x="90" y="218">Win+Shift+S screenshots: freeze,</text>
+<text x="90" y="258">select, clipboard + PNG.</text>
+</g>
+<g font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="20" font-weight="600" text-anchor="middle">
+<rect x="90" y="298" width="68" height="40" rx="8" fill="#16202B" stroke="#2A3746"/><rect x="90" y="334" width="68" height="4" rx="2" fill="#40BEFF" fill-opacity="0.55"/><text x="124" y="324" fill="#E6EDF3">Win</text>
+<text x="176" y="324" fill="#5D6B79">+</text>
+<rect x="194" y="298" width="80" height="40" rx="8" fill="#16202B" stroke="#2A3746"/><rect x="194" y="334" width="80" height="4" rx="2" fill="#40BEFF" fill-opacity="0.55"/><text x="234" y="324" fill="#E6EDF3">Shift</text>
+<text x="292" y="324" fill="#5D6B79">+</text>
+<rect x="310" y="298" width="44" height="40" rx="8" fill="#16202B" stroke="#2A3746"/><rect x="310" y="334" width="44" height="4" rx="2" fill="#40BEFF" fill-opacity="0.55"/><text x="332" y="324" fill="#E6EDF3">S</text>
+</g>
+<g clip-path="url(#screen)">
+<rect x="704" y="56" width="488" height="288" fill="#1B2531"/>
+<rect x="728" y="80" width="250" height="168" rx="6" fill="#273445"/><rect x="728" y="80" width="250" height="22" rx="6" fill="#314154"/>
+<rect x="744" y="118" width="150" height="8" rx="4" fill="#3A4B5F"/><rect x="744" y="136" width="200" height="8" rx="4" fill="#3A4B5F"/><rect x="744" y="154" width="120" height="8" rx="4" fill="#3A4B5F"/>
+<rect x="900" y="140" width="268" height="170" rx="6" fill="#2D3C4F"/><rect x="900" y="140" width="268" height="22" rx="6" fill="#384A60"/>
+<rect x="918" y="182" width="96" height="96" rx="6" fill="#40BEFF" fill-opacity="0.22"/><rect x="1030" y="186" width="118" height="8" rx="4" fill="#46596F"/><rect x="1030" y="204" width="90" height="8" rx="4" fill="#46596F"/>
+<rect x="704" y="326" width="488" height="18" fill="#121A23"/>
+<path fill="#000000" fill-opacity="0.5" fill-rule="evenodd" d="M704 56h488v288H704zM880 112v176h260V112z"/>
+<rect x="880" y="112" width="260" height="176" fill="none" stroke="#40BEFF" stroke-width="2"/>
+<rect x="880" y="296" width="96" height="24" rx="4" fill="#141414" fill-opacity="0.85"/>
+<text x="928" y="313" text-anchor="middle" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="13" fill="#FFFFFF">520 × 352</text>
+</g>
+<rect x="704.5" y="56.5" width="487" height="287" rx="10" fill="none" stroke="#FFFFFF" stroke-opacity="0.10"/>
+</svg>

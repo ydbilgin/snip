@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0A0F15"/><stop offset="1" stop-color="#111A24"/></linearGradient>
+<pattern id="grid" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#FFFFFF" stroke-opacity="0.03"/></pattern>
+<clipPath id="screen"><rect x="700" y="112" width="500" height="340" rx="12"/></clipPath>
+</defs>
+<rect width="1280" height="640" fill="url(#bg)"/>
+<rect width="1280" height="640" fill="url(#grid)"/>
+<rect width="1280" height="6" fill="#40BEFF"/>
+<g shape-rendering="crispEdges" fill="#40BEFF" transform="translate(80 140) scale(5)">
+<path d="M0 0h5v2H0zM0 2h2v3H0zM11 0h5v2h-5zM14 2h2v3h-2zM0 11h2v3H0zM0 14h5v2H0zM14 11h2v3h-2zM11 14h5v2h-5zM6 6h4v4H6z"/>
+</g>
+<text x="190" y="210" font-family="Cascadia Code, Consolas, SFMono-Regular, Menlo, monospace" font-size="120" font-weight="700" letter-spacing="-3" fill="#F0F6FC">snip</text>
+<g font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="34" fill="#AAB6C2">
+<text x="82" y="323">Win+Shift+S screenshots: freeze,</text>
+<text x="82" y="369">select, clipboard + PNG.</text>
+</g>
+<g font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="22" font-weight="600" text-anchor="middle">
+<rect x="82" y="436" width="74" height="44" rx="9" fill="#16202B" stroke="#2A3746"/><rect x="82" y="476" width="74" height="4" rx="2" fill="#40BEFF" fill-opacity="0.55"/><text x="119" y="465" fill="#E6EDF3">Win</text>
+<text x="174" y="465" fill="#5D6B79">+</text>
+<rect x="192" y="436" width="88" height="44" rx="9" fill="#16202B" stroke="#2A3746"/><rect x="192" y="476" width="88" height="4" rx="2" fill="#40BEFF" fill-opacity="0.55"/><text x="236" y="465" fill="#E6EDF3">Shift</text>
+<text x="298" y="465" fill="#5D6B79">+</text>
+<rect x="316" y="436" width="48" height="44" rx="9" fill="#16202B" stroke="#2A3746"/><rect x="316" y="476" width="48" height="4" rx="2" fill="#40BEFF" fill-opacity="0.55"/><text x="340" y="465" fill="#E6EDF3">S</text>
+</g>
+<g clip-path="url(#screen)">
+<rect x="700" y="112" width="500" height="340" fill="#1B2531"/>
+<rect x="724" y="138" width="256" height="196" rx="6" fill="#273445"/><rect x="724" y="138" width="256" height="24" rx="6" fill="#314154"/>
+<rect x="742" y="180" width="150" height="9" rx="4" fill="#3A4B5F"/><rect x="742" y="200" width="204" height="9" rx="4" fill="#3A4B5F"/><rect x="742" y="220" width="120" height="9" rx="4" fill="#3A4B5F"/>
+<rect x="902" y="206" width="276" height="200" rx="6" fill="#2D3C4F"/><rect x="902" y="206" width="276" height="24" rx="6" fill="#384A60"/>
+<rect x="922" y="252" width="110" height="110" rx="6" fill="#40BEFF" fill-opacity="0.22"/><rect x="1048" y="256" width="110" height="9" rx="4" fill="#46596F"/><rect x="1048" y="276" width="84" height="9" rx="4" fill="#46596F"/>
+<rect x="700" y="432" width="500" height="20" fill="#121A23"/>
+<path fill="#000000" fill-opacity="0.5" fill-rule="evenodd" d="M700 112h500v340H700zM880 176v208h270V176z"/>
+<rect x="880" y="176" width="270" height="208" fill="none" stroke="#40BEFF" stroke-width="2"/>
+<rect x="880" y="392" width="104" height="26" rx="4" fill="#141414" fill-opacity="0.85"/>
+<text x="932" y="410" text-anchor="middle" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#FFFFFF">540 × 416</text>
+</g>
+<rect x="700.5" y="112.5" width="499" height="339" rx="12" fill="none" stroke="#FFFFFF" stroke-opacity="0.10"/>
+<g font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="24">
+<text x="82" y="568" fill="#7D8A97">Windows 11 · Rust · no network code</text>
+<text x="1200" y="568" text-anchor="end" font-weight="600" fill="#40BEFF">github.com/ydbilgin/snip</text>
+</g>
+</svg>

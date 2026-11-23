@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest an idea for snip.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: snip deliberately stays small (image snips only). Please describe the problem first; the solution can be discussed.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like snip to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you use today? (Snipping Tool, another tool, a script ...)
+  - type: input
+    id: version
+    attributes:
+      label: snip version and Windows version
+      placeholder: snip 0.1.0 · Windows 11 24H2
