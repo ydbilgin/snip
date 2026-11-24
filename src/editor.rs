@@ -19,6 +19,7 @@ use crate::theme::{MARKER_DEFAULT, PALETTE, Theme};
 use crate::toolbar::{self, Bar, BarState, Item, Palette, SizeMenu, Tool};
 
 pub const VK_BACK: u32 = 0x08;
+pub const VK_DELETE: u32 = 0x2E;
 
 /// Size presets in DIPs; the first three remain the existing 1/2/3 shortcuts.
 pub const STROKE: [f32; 6] = crate::theme::ANNOTATION_STROKE;
@@ -45,6 +46,9 @@ pub enum Effect {
     Pin,
     /// Open the system colour dialog; answer with `set_color`.
     CustomColor,
+    /// The colour picker was pressed at this desktop pixel: read it from the frozen screen and
+    /// answer with `picked_color`. `copy`: Shift was down, also put its hex on the clipboard.
+    PickColor { at: Point, copy: bool },
     Close,
 }
 
@@ -66,6 +70,8 @@ enum Drag {
     Adjust { grab: Grab, start: Point, orig: Rect },
     Draw(Shape),
     Bar(Item),
+    /// The select tool drags shape `index`; `now` is where it would land.
+    Move { index: usize, start: Point, orig: Shape, now: Shape },
 }
 
 /// What a mouse drag in progress is doing, for the cursor fence (`cursorfence.rs`).
@@ -145,18 +151,33 @@ pub struct TextEdit {
 }
 
 /// What the editor remembers between snips (`editor.toml`, schema 1).
+///
+/// `editor.toml` keeps exactly the keys of 0.3, whose reader refuses unknown keys: a file written
+/// here must stay readable there, or going back to 0.3 resets colour and size. Keys added later
+/// go to `editor-extra.toml` (`extra_text`), and this reader ignores keys it does not know, so a
+/// file from a newer snip does not reset anything either.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Prefs {
     pub schema: u32,
     pub color: String,
     pub size: usize,
     pub blur: bool,
+    /// The Frame button was on (0.4, `editor-extra.toml`).
+    #[serde(skip)]
+    pub frame: bool,
+}
+
+/// The keys newer than 0.3 (`editor-extra.toml`).
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct Extra {
+    frame: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { schema: 1, color: PALETTE[0].to_hex(), size: 1, blur: false }
+        Self { schema: 1, color: PALETTE[0].to_hex(), size: 1, blur: false, frame: false }
     }
 }
 
@@ -164,8 +185,19 @@ impl Prefs {
     pub fn parse(text: &str) -> Prefs {
         toml::from_str::<Prefs>(text).unwrap_or_default()
     }
+    /// `editor.toml` and `editor-extra.toml` together; a broken extra file only loses its keys.
+    pub fn parse_with(text: &str, extra: &str) -> Prefs {
+        let mut p = Prefs::parse(text);
+        p.frame = toml::from_str::<Extra>(extra).map(|x| x.frame).unwrap_or(false);
+        p
+    }
+    /// `editor.toml`: the 0.3 keys only.
     pub fn to_text(&self) -> String {
         toml::to_string(self).unwrap_or_default()
+    }
+    /// `editor-extra.toml`.
+    pub fn extra_text(&self) -> String {
+        toml::to_string(&Extra { frame: self.frame }).unwrap_or_default()
     }
 }
 
@@ -190,6 +222,12 @@ pub struct Editor {
     pub lang: Lang,
     /// Text capture is on: the bar and Ctrl+Shift+C offer "copy text".
     pub text_action: bool,
+    /// The Frame button: the finished picture goes onto a framed ground (`beautify.rs`).
+    pub frame: bool,
+    /// The shape the select tool picked (Delete removes it, a drag moves it).
+    pub picked: Option<usize>,
+    /// The tool the colour picker returns to.
+    prev_tool: Option<Tool>,
     hover_item: Option<Item>,
     hover_cell: Option<Option<usize>>,
     drag: Option<Drag>,
@@ -240,6 +278,9 @@ impl Editor {
             cursor,
             lang: Lang::En,
             text_action: false,
+            frame: prefs.frame,
+            picked: None,
+            prev_tool: None,
             hover_item: None,
             hover_cell: None,
             appended_rev: None,
@@ -249,7 +290,7 @@ impl Editor {
     }
 
     pub fn prefs(&self) -> Prefs {
-        Prefs { schema: 1, color: self.color.to_hex(), size: self.size, blur: self.obscure == ObscureMode::Blur }
+        Prefs { schema: 1, color: self.color.to_hex(), size: self.size, blur: self.obscure == ObscureMode::Blur, frame: self.frame }
     }
 
     /// Scale of the monitor that holds the toolbar (the selection's bottom-right corner).
@@ -270,9 +311,10 @@ impl Editor {
         if self.phase != Phase::Editing {
             return None;
         }
-        let bar = Bar::layout(&toolbar::editor_slots_with(self.tool, self.text_action), &self.theme, self.scale());
         let m = self.mons.at(Point::new(sel.right - 1, sel.bottom - 1))?;
         let gap = m.px(crate::theme::EDITOR_BAR_GAP);
+        // On a small monitor at a high scale the bar wraps into rows instead of running off it.
+        let bar = Bar::layout_fit(&toolbar::editor_slots_with(self.tool, self.text_action), &self.theme, self.scale(), m.rect.width() - 2 * gap);
         Some((dpi::place_beside(&sel, bar.w, bar.h, m, gap), bar))
     }
 
@@ -327,6 +369,8 @@ impl Editor {
         Some(match tool {
             Tool::Arrow => Shape::Arrow { a: p, b: p, color, width },
             Tool::Rect => Shape::Rect { a: p, b: p, color, width },
+            Tool::Ellipse => Shape::Ellipse { a: p, b: p, color, width },
+            Tool::Spotlight => Shape::Spotlight { a: p, b: p },
             Tool::Line => Shape::Line { a: p, b: p, color, width },
             Tool::Pen => Shape::Pen { pts: vec![p], color, width },
             Tool::Marker => Shape::Marker { pts: vec![p], color, width },
@@ -336,8 +380,77 @@ impl Editor {
                 mode: self.obscure,
                 strength: self.dip(if self.obscure == ObscureMode::Pixelate { PIXEL_BLOCK[self.size] } else { BLUR_R[self.size] }),
             },
-            Tool::Text | Tool::Steps => return None,
+            Tool::Text | Tool::Steps | Tool::Select | Tool::Picker => return None,
         })
+    }
+
+    /// The document shape left out of the document image: the one being typed or being moved.
+    fn hidden(&self) -> Option<usize> {
+        match &self.drag {
+            Some(Drag::Move { index, .. }) => Some(*index),
+            _ => self.text.as_ref().and_then(|t| t.original),
+        }
+    }
+
+    /// The shape the pointer is dragging right now (a new one, or a moved one).
+    fn live_shape(&self) -> Option<&Shape> {
+        match &self.drag {
+            Some(Drag::Draw(s)) => Some(s),
+            Some(Drag::Move { now, .. }) => Some(now),
+            _ => None,
+        }
+    }
+
+    /// Draw the dragged shape onto a document image (inside `clip`, image coordinates, if given).
+    /// A spotlight being dragged goes under the annotations as it will once dropped: they are
+    /// drawn again on top of it.
+    fn draw_live(&self, img: &mut Canvas, sel: Rect, clip: Option<IBox>, g: &dyn Glyphs) {
+        let Some(s) = self.live_shape() else { return };
+        let o = (sel.left, sel.top);
+        let mut list = vec![s];
+        if matches!(s, Shape::Spotlight { .. }) {
+            let hidden = self.hidden();
+            list.extend(self.doc.shapes().iter().enumerate().filter(|(i, d)| Some(*i) != hidden && !matches!(d, Shape::Spotlight { .. })).map(|(_, d)| d));
+        }
+        for shape in list {
+            match clip {
+                Some(c) => annotate::render_in(img, o, shape, c, g),
+                None => annotate::render(img, o, std::slice::from_ref(shape), g),
+            }
+        }
+    }
+
+    /// The topmost shape under `p` (the select tool).
+    pub fn shape_at(&self, p: Point, glyphs: &dyn Glyphs) -> Option<usize> {
+        let pf = Pt::new(p.x as f32 + 0.5, p.y as f32 + 0.5);
+        let slop = self.dip(crate::theme::HANDLE_HIT_SLOP);
+        self.doc.shapes().iter().enumerate().rev().find(|(_, s)| s.hit(pf, slop, glyphs)).map(|(i, _)| i)
+    }
+
+    /// The picked shape, if it still exists (undo can take it away).
+    fn picked_shape(&self) -> Option<&Shape> {
+        self.picked.and_then(|i| self.doc.shapes().get(i))
+    }
+
+    /// The colour picker read `c` at the pressed pixel: it becomes the ink, and the tool before
+    /// the picker comes back.
+    pub fn picked_color(&mut self, c: Rgba) -> Effect {
+        self.tool = self.prev_tool.take().or(Some(Tool::Arrow));
+        self.set_color(c.with_alpha(255))
+    }
+
+    /// The magnifier is useful while picking the area and while the colour picker is out.
+    pub fn wants_loupe(&self) -> bool {
+        match self.phase {
+            Phase::Selecting => true,
+            Phase::Editing => self.tool == Some(Tool::Picker) && self.drag.is_none() && !self.on_ui(self.cursor),
+        }
+    }
+
+    fn on_ui(&self, p: Point) -> bool {
+        self.size_menu().is_some_and(|(at, m)| m.hit(p.x - at.x, p.y - at.y).is_some())
+            || self.palette().is_some_and(|(at, pal)| pal.hit(p.x - at.x, p.y - at.y).is_some())
+            || self.bar().is_some_and(|(at, b)| b.hit(p.x - at.x, p.y - at.y).is_some())
     }
 
     fn changed(&mut self) {
@@ -456,10 +569,28 @@ impl Editor {
     pub fn drop_tool(&mut self) -> Effect {
         self.commit_text();
         self.tool = None;
+        self.end_move(false);
         self.drag = None;
+        if self.picked.take().is_some() {
+            self.changed();
+        }
         self.palette_open = false;
         self.size_open = false;
         Effect::Redraw
+    }
+
+    /// End a select-tool drag that is still going: `keep` drops the shape where it is now, else it
+    /// goes back. Either way the shape is drawn again: while dragged it was left out of the picture.
+    fn end_move(&mut self, keep: bool) {
+        if !matches!(self.drag, Some(Drag::Move { .. })) {
+            return;
+        }
+        if let Some(Drag::Move { index, orig, now, .. }) = self.drag.take() {
+            if keep && now != orig && self.doc.shapes().get(index) == Some(&orig) {
+                self.doc.replace(index, now);
+            }
+            self.changed();
+        }
     }
 
     fn press_item(&mut self, it: Item) -> Effect {
@@ -468,7 +599,17 @@ impl Editor {
                 self.commit_text();
                 self.palette_open = false;
                 self.size_open = false;
+                if t == Tool::Picker && self.tool != Some(Tool::Picker) {
+                    self.prev_tool = self.tool;
+                }
                 self.tool = if self.tool == Some(t) { None } else { Some(t) };
+                if self.tool != Some(Tool::Select) && self.picked.take().is_some() {
+                    self.changed(); // the pick outline goes away
+                }
+                Effect::Redraw
+            }
+            Item::Frame => {
+                self.frame = !self.frame;
                 Effect::Redraw
             }
             Item::Color => {
@@ -498,6 +639,7 @@ impl Editor {
 
     fn finish(&mut self, e: Effect) -> Effect {
         self.commit_text();
+        self.end_move(true);
         if self.sel.is_some() { e } else { Effect::None }
     }
 
@@ -505,14 +647,19 @@ impl Editor {
         if self.cancel_text() {
             return Effect::Redraw;
         }
+        // A drag in progress holds a shape index that undo would make stale.
+        self.end_move(false);
         if self.doc.undo() {
+            self.picked = None;
             self.changed();
             Effect::Redraw
         } else { Effect::None }
     }
 
     fn redo(&mut self) -> Effect {
+        self.end_move(false);
         if self.doc.redo() {
+            self.picked = None;
             self.changed();
             Effect::Redraw
         } else {
@@ -525,7 +672,7 @@ impl Editor {
     pub fn drag_class(&self) -> Option<DragClass> {
         match &self.drag {
             Some(Drag::Select { start }) => Some(DragClass::Select(*start)),
-            Some(Drag::Draw(_)) => Some(DragClass::Draw),
+            Some(Drag::Draw(_) | Drag::Move { .. }) => Some(DragClass::Draw),
             _ => None,
         }
     }
@@ -542,7 +689,7 @@ impl Editor {
     pub fn on_down_mods(
         &mut self,
         p: Point,
-        _shift: bool,
+        shift: bool,
         ctrl: bool,
         glyphs: &dyn Glyphs,
     ) -> Effect {
@@ -654,6 +801,20 @@ impl Editor {
                 self.changed();
                 Effect::Redraw
             }
+            Some(Tool::Select) => {
+                let hit = self.shape_at(p, glyphs);
+                if hit != self.picked {
+                    self.picked = hit;
+                    self.changed(); // the pick outline moves
+                }
+                if let Some(index) = hit {
+                    let orig = self.doc.shapes()[index].clone();
+                    self.drag = Some(Drag::Move { index, start: p, now: orig.clone(), orig });
+                    self.changed(); // the document image leaves the moved shape out
+                }
+                Effect::Redraw
+            }
+            Some(Tool::Picker) => Effect::PickColor { at: p, copy: shift },
             Some(Tool::Steps) => {
                 // A badge outside the selection would be invisible yet take a number.
                 if !sel.contains(p) {
@@ -701,8 +862,8 @@ impl Editor {
                 let pf = Pt::new(p.x as f32 + 0.5, p.y as f32 + 0.5);
                 match &mut s {
                     Shape::Arrow { a, b, .. } | Shape::Line { a, b, .. } => *b = if shift { annotate::snap45(*a, pf) } else { pf },
-                    Shape::Rect { a, b, .. } => *b = if shift { annotate::square(*a, pf) } else { pf },
-                    Shape::Obscure { b, .. } => *b = pf,
+                    Shape::Rect { a, b, .. } | Shape::Ellipse { a, b, .. } => *b = if shift { annotate::square(*a, pf) } else { pf },
+                    Shape::Obscure { b, .. } | Shape::Spotlight { b, .. } => *b = pf,
                     Shape::Pen { pts, .. } | Shape::Marker { pts, .. } if pts.last().is_none_or(|l| l.dist(pf) >= 1.5) => pts.push(pf),
                     _ => {}
                 }
@@ -710,7 +871,17 @@ impl Editor {
                 Effect::Redraw
             }
             Some(Drag::Bar(_)) => Effect::None,
-            None => self.update_hover(p),
+            Some(Drag::Move { index, start, orig, .. }) => {
+                let d = Pt::new((p.x - start.x) as f32, (p.y - start.y) as f32);
+                let now = orig.translated(d);
+                self.drag = Some(Drag::Move { index, start, orig, now });
+                Effect::Redraw
+            }
+            None => {
+                let e = self.update_hover(p);
+                // The magnifier follows the cursor while the picker is out.
+                if self.tool == Some(Tool::Picker) && self.phase == Phase::Editing { Effect::Redraw } else { e }
+            }
         }
     }
 
@@ -755,6 +926,16 @@ impl Editor {
             Some(Drag::Bar(it)) => {
                 let at_up = self.bar().and_then(|(at, b)| b.hit(p.x - at.x, p.y - at.y));
                 if at_up == Some(it) { self.press_item(it) } else { Effect::Redraw }
+            }
+            Some(Drag::Move { index, orig, now, .. }) => {
+                // One undo step per move; a click without a move changes nothing. The shape must
+                // still be the one picked up, or the move would write over another shape.
+                if now != orig && self.doc.shapes().get(index) == Some(&orig) {
+                    self.doc.replace(index, now);
+                }
+                self.picked = Some(index).filter(|i| *i < self.doc.shapes().len());
+                self.changed();
+                Effect::Redraw
             }
             None => e,
         }
@@ -828,6 +1009,33 @@ impl Editor {
                 _ => Effect::None,
             };
         }
+        if let Some(index) = self.picked.filter(|i| *i < self.doc.shapes().len())
+            && self.tool == Some(Tool::Select)
+            && self.drag.is_none()
+            && !ctrl
+        {
+            match vk {
+                VK_DELETE | VK_BACK => {
+                    self.doc.remove(index);
+                    self.picked = None;
+                    self.changed();
+                    return Effect::Redraw;
+                }
+                VK_ESCAPE => {
+                    self.picked = None;
+                    self.changed();
+                    return Effect::Redraw;
+                }
+                VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN => {
+                    let (dx, dy) = arrow(vk, shift);
+                    let moved = self.doc.shapes()[index].translated(Pt::new(dx as f32, dy as f32));
+                    self.doc.replace(index, moved);
+                    self.changed();
+                    return Effect::Redraw;
+                }
+                _ => {}
+            }
+        }
         match vk {
             VK_ESCAPE => {
                 if self.size_open {
@@ -836,7 +1044,9 @@ impl Editor {
                 } else if self.palette_open {
                     self.palette_open = false;
                     Effect::Redraw
-                } else if self.drag.take().is_some() {
+                } else if self.drag.is_some() {
+                    self.end_move(false);
+                    self.drag = None;
                     Effect::Redraw
                 } else {
                     Effect::Close
@@ -894,8 +1104,11 @@ impl Editor {
     /// `compose_doc` that draws on the given pixels instead of copying them.
     fn compose_doc_on(&self, mut img: Canvas, g: &dyn Glyphs) -> Canvas {
         if let Some(sel) = self.sel {
-            for (index, shape) in self.doc.shapes().iter().enumerate() {
-                if self.text.as_ref().and_then(|t| t.original) != Some(index) {
+            // Spotlights darken the screenshot, never the annotations: they go first.
+            let order = self.doc.shapes().iter().enumerate().filter(|(_, s)| matches!(s, Shape::Spotlight { .. }))
+                .chain(self.doc.shapes().iter().enumerate().filter(|(_, s)| !matches!(s, Shape::Spotlight { .. })));
+            for (index, shape) in order {
+                if self.hidden() != Some(index) {
                     annotate::render(
                         &mut img,
                         (sel.left, sel.top),
@@ -916,7 +1129,7 @@ impl Editor {
             *cache = None;
             return false;
         };
-        let skip = self.text.as_ref().and_then(|t| t.original);
+        let skip = self.hidden();
         let shapes = self.doc.shapes();
         if let Some(c) = cache
             && c.sel == sel
@@ -925,7 +1138,9 @@ impl Editor {
             if c.rev == self.rev {
                 return true;
             }
-            if skip.is_none() && self.appended_rev == Some(self.rev) && c.rev + 1 == self.rev && c.shapes + 1 == shapes.len() {
+            // A new spotlight goes under the annotations: that needs a fresh start, not a layer on top.
+            let on_top = !matches!(shapes.last(), Some(Shape::Spotlight { .. }));
+            if skip.is_none() && on_top && self.appended_rev == Some(self.rev) && c.rev + 1 == self.rev && c.shapes + 1 == shapes.len() {
                 annotate::render(&mut c.img, (sel.left, sel.top), &shapes[c.shapes..], g);
                 c.rev = self.rev;
                 c.shapes = shapes.len();
@@ -945,10 +1160,8 @@ impl Editor {
 
     pub fn preview(&self, img: &mut Canvas, g: &dyn Glyphs, draw_text: bool) {
         let Some(sel) = self.sel else { return };
+        self.draw_live(img, sel, None, g);
         let mut extra = Vec::new();
-        if let Some(Drag::Draw(s)) = &self.drag {
-            extra.push(s.clone());
-        }
         if draw_text && let Some(t) = &self.text {
             extra.push(Shape::Text {
                 at: t.at,
@@ -958,6 +1171,20 @@ impl Editor {
             });
         }
         annotate::render(img, (sel.left, sel.top), &extra, g);
+        // The picked shape: a thin two-tone box around it (preview only, never in the result).
+        if self.drag.is_none()
+            && let Some(s) = self.picked_shape()
+        {
+            let b = pick_box(s, g, self.dip(3.0));
+            let local = IBox::new(b.x0 - sel.left, b.y0 - sel.top, b.x1 - sel.left, b.y1 - sel.top);
+            let th = self.dip(crate::theme::BORDER_WIDTH).max(1.0);
+            let mut outer = crate::raster::Mask::new(img.bounds());
+            outer.box_outline(local.x0 as f32 - th, local.y0 as f32 - th, local.x1 as f32 + th, local.y1 as f32 + th, th);
+            img.blend_mask(&outer, crate::theme::HANDLE_FILL);
+            let mut inner = crate::raster::Mask::new(img.bounds());
+            inner.box_outline(local.x0 as f32, local.y0 as f32, local.x1 as f32, local.y1 as f32, th);
+            img.blend_mask(&inner, self.theme.handle_ring());
+        }
         if draw_text && let Some(t) = &self.text {
             // Caret after the last line, 1 DIP wide.
             let size = t.size;
@@ -974,7 +1201,7 @@ impl Editor {
     /// True when the picture under the selection differs from the frozen frame. While false the
     /// overlay shows the frozen texture itself: no readback, no copies.
     pub fn needs_comp(&self) -> bool {
-        !self.doc.is_empty() || self.text.is_some() || matches!(self.drag, Some(Drag::Draw(_)))
+        !self.doc.is_empty() || self.text.is_some() || matches!(self.drag, Some(Drag::Draw(_) | Drag::Move { .. }))
     }
 
     /// The selection is being moved or resized: its pixels are cropped again on every move.
@@ -984,12 +1211,12 @@ impl Editor {
 
     /// A drawing drag is running: the toolbar and the labels cannot change.
     pub fn is_drawing(&self) -> bool {
-        matches!(self.drag, Some(Drag::Draw(_)))
+        matches!(self.drag, Some(Drag::Draw(_) | Drag::Move { .. }))
     }
 
     /// Boxes the shape being dragged touches (from point `from` for a stroke), in image coordinates.
     fn preview_cover(&self, sel: Rect, img: &Canvas, from: usize) -> Vec<IBox> {
-        let Some(Drag::Draw(s)) = &self.drag else { return Vec::new() };
+        let Some(s) = self.live_shape() else { return Vec::new() };
         s.cover(from)
             .into_iter()
             .map(|b| IBox::new(b.x0 - sel.left, b.y0 - sel.top, b.x1 - sel.left, b.y1 - sel.top).intersect(&img.bounds()))
@@ -1032,11 +1259,11 @@ impl Editor {
                 }
                 f.stroke_done = 0;
             }
-            if let Some(Drag::Draw(s)) = &self.drag {
+            if self.live_shape().is_some() {
                 // Each box is rebuilt from the document, so overlapping boxes cannot blend twice.
                 for b in &new {
                     f.img.copy_box_from(doc, *b);
-                    annotate::render_in(&mut f.img, (sel.left, sel.top), s, *b, g);
+                    self.draw_live(&mut f.img, sel, Some(*b), g);
                     parts.push(*b);
                 }
             }
@@ -1096,14 +1323,15 @@ impl Editor {
             return CursorKind::Cross;
         }
         match &self.drag {
-            Some(Drag::Adjust { grab: Grab::Move, .. }) => return CursorKind::Move,
+            Some(Drag::Adjust { grab: Grab::Move, .. } | Drag::Move { .. }) => return CursorKind::Move,
             Some(Drag::Adjust { grab: Grab::Handle(h), .. }) => return handle_cursor(*h),
             Some(Drag::Draw(_) | Drag::Select { .. }) => return CursorKind::Cross,
             _ => {}
         }
         let on_ui = self.size_menu().is_some_and(|(at, m)| m.hit(p.x - at.x, p.y - at.y).is_some())
             || self.palette().is_some_and(|(at, pal)| pal.hit(p.x - at.x, p.y - at.y).is_some())
-            || self.bar().is_some_and(|(at, b)| b.hit(p.x - at.x, p.y - at.y).is_some());
+            // The whole bar, separators and padding too: no cross over a panel.
+            || self.bar().is_some_and(|(at, b)| IBox::xywh(at.x, at.y, b.w, b.h).contains(p.x, p.y));
         if on_ui {
             return CursorKind::Arrow;
         }
@@ -1117,6 +1345,9 @@ impl Editor {
                 None if sel.contains(p) => CursorKind::Arrow,
                 None => CursorKind::Cross,
             },
+            Some(Tool::Select) => {
+                if self.shape_at(p, &crate::raster::BoxFont).is_some() { CursorKind::Move } else { CursorKind::Arrow }
+            }
             Some(Tool::Text) if sel.contains(p) => CursorKind::IBeam,
             Some(Tool::Text | Tool::Steps) if !sel.contains(p) => CursorKind::Arrow,
             Some(_) => CursorKind::Cross,
@@ -1158,6 +1389,9 @@ impl Editor {
             if self.size_open {
                 active.push(Item::Size);
             }
+            if self.frame {
+                active.push(Item::Frame);
+            }
             let mut disabled = Vec::new();
             if !self.doc.can_undo() && self.text.is_none() {
                 disabled.push(Item::Undo);
@@ -1190,8 +1424,14 @@ impl Editor {
             let cv = toolbar::render_label(&format!("{} \u{00D7} {}", r.width(), r.height()), &self.theme, sc, g);
             let gap = (crate::theme::SELECTION_LABEL_GAP * sc).round() as i32;
             let m = self.mons.at(Point::new(r.left, r.top)).map(|m| m.rect).unwrap_or(r);
-            let y = if r.top - gap - cv.h as i32 >= m.top { r.top - gap - cv.h as i32 } else { r.top + gap };
-            let x = r.left.max(m.left).min(m.right - cv.w as i32);
+            let (w, h) = (cv.w as i32, cv.h as i32);
+            let x = r.left.max(m.left).min(m.right - w);
+            let above = if r.top - gap - h >= m.top { r.top - gap - h } else { r.top + gap };
+            // The label never sits under the bar: when the bar took the space above the selection,
+            // the label goes just inside its top-left corner, else below its bottom-left corner.
+            let bar_box = self.bar().map(|(at, b)| Rect::from_xywh(at.x, at.y, b.w, b.h));
+            let clear = |y: i32| bar_box.is_none_or(|b| Rect::from_xywh(x, y, w, h).intersect(&b).is_none());
+            let y = [above, r.top + gap, (r.bottom + gap).min(m.bottom - h)].into_iter().find(|&y| clear(y)).unwrap_or(above);
             (Point::new(x, y), cv)
         });
         let tooltip = self
@@ -1226,6 +1466,17 @@ impl Editor {
     pub fn is_typing(&self) -> bool {
         self.text.is_some()
     }
+}
+
+/// The box the pick outline goes around, in desktop pixels, `pad` outside the shape.
+fn pick_box(s: &Shape, g: &dyn Glyphs, pad: f32) -> IBox {
+    let b = match s {
+        Shape::Spotlight { a, b } => IBox::around(a.x, a.y, b.x, b.y, 0.0),
+        Shape::Text { .. } => annotate::text_bounds(s, g).unwrap_or_else(|| s.bounds()),
+        _ => s.bounds(),
+    };
+    let p = pad.round() as i32;
+    IBox::new(b.x0 - p, b.y0 - p, b.x1 + p, b.y1 + p)
 }
 
 fn arrow(vk: u32, shift: bool) -> (i32, i32) {
@@ -1347,7 +1598,7 @@ mod tests {
 
     #[test]
     fn drawing_with_each_drag_tool_adds_one_shape_and_undo_removes_it() {
-        for t in [Tool::Arrow, Tool::Rect, Tool::Line, Tool::Pen, Tool::Marker, Tool::Obscure] {
+        for t in [Tool::Arrow, Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Pen, Tool::Marker, Tool::Spotlight, Tool::Obscure] {
             let mut e = selected((100, 100), (900, 700));
             assert_eq!(click_item(&mut e, Item::Tool(t)), Effect::Redraw);
             assert_eq!(e.tool, Some(t));
@@ -1592,6 +1843,50 @@ mod tests {
     }
 
     #[test]
+    fn the_size_label_never_sits_under_the_bar() {
+        // A selection that fills the monitor below a thin strip: the bar goes above it, where the
+        // label used to be; the label moves inside the selection's corner.
+        let mon = Rect::from_xywh(0, 0, 1040, 650);
+        let mons = Monitors::new(vec![Monitor::new(mon, 96)]);
+        let mut e = Editor::new(mons, vec![], Theme::new(Look::Graphite, Mode::Light), &Prefs::default(), Point::new(0, 0));
+        drag(&mut e, (300, 80), (1000, 649));
+        let v = e.view(&BoxFont);
+        let ((bat, bar), (lat, label)) = (v.bar.unwrap(), v.label.unwrap());
+        let b = Rect::from_xywh(bat.x, bat.y, bar.w as i32, bar.h as i32);
+        let l = Rect::from_xywh(lat.x, lat.y, label.w as i32, label.h as i32);
+        assert!(b.bottom <= 80, "the bar is above the selection: {b:?}");
+        assert!(l.intersect(&b).is_none(), "label {l:?} under the bar {b:?}");
+        assert!(l.left >= 300 && l.top >= 80, "inside the corner: {l:?}");
+        // With room above for both, the label keeps its place above the corner.
+        let mons = Monitors::new(vec![Monitor::new(mon, 96)]);
+        let mut e = Editor::new(mons, vec![], Theme::new(Look::Graphite, Mode::Light), &Prefs::default(), Point::new(0, 0));
+        drag(&mut e, (130, 120), (900, 500));
+        let (lat, label) = e.view(&BoxFont).label.unwrap();
+        assert!(lat.y + label.h as i32 <= 120, "above: {lat:?}");
+    }
+
+    #[test]
+    fn the_bar_wraps_on_a_small_monitor_at_250_percent_and_stays_on_it() {
+        let mon = Rect::from_xywh(0, 0, 1920, 1080);
+        let mons = Monitors::new(vec![Monitor::new(mon, 240)]);
+        for text_action in [false, true] {
+            let mut e = Editor::new(mons.clone(), vec![], Theme::new(Look::Graphite, Mode::Dark), &Prefs::default(), Point::new(0, 0));
+            e.text_action = text_action;
+            drag(&mut e, (200, 150), (1700, 700));
+            let (at, bar) = e.bar().unwrap();
+            assert!(bar.h > (36.0 * 2.5 + 6.0 * 5.0) as i32, "two rows");
+            assert!(at.x >= mon.left && at.x + bar.w <= mon.right && at.y >= mon.top && at.y + bar.h <= mon.bottom, "{at:?} {}x{}", bar.w, bar.h);
+            // Every button can still be pressed where it is drawn.
+            let mut f = Editor::new(mons.clone(), vec![], Theme::new(Look::Graphite, Mode::Dark), &Prefs::default(), Point::new(0, 0));
+            f.text_action = text_action;
+            drag(&mut f, (200, 150), (1700, 700));
+            assert_eq!(click_item(&mut f, Item::Tool(Tool::Ellipse)), Effect::Redraw);
+            assert_eq!(f.tool, Some(Tool::Ellipse));
+            assert_eq!(click_item(&mut f, Item::Copy), Effect::Copy);
+        }
+    }
+
+    #[test]
     fn single_monitor_at_200_percent() {
         let mons = Monitors::new(vec![Monitor::new(Rect::from_xywh(0, 0, 3840, 2160), 192)]);
         let mut e = Editor::new(mons, vec![], Theme::new(Look::Paper, Mode::Dark), &Prefs::default(), Point::new(0, 0));
@@ -1612,8 +1907,232 @@ mod tests {
     }
 
     #[test]
+    fn select_tool_picks_moves_nudges_and_deletes_a_shape() {
+        let mut e = selected((100, 100), (900, 700));
+        e.tool = Some(Tool::Rect);
+        drag(&mut e, (200, 200), (400, 300));
+        e.tool = Some(Tool::Arrow);
+        drag(&mut e, (600, 500), (700, 600));
+        assert_eq!(e.doc.shapes().len(), 2);
+        assert_eq!(e.on_key(0x56, false, false), Effect::Redraw); // V
+        assert_eq!(e.tool, Some(Tool::Select));
+        // A press inside an outline-only box hits nothing; on its edge it picks the box.
+        e.on_down(Point::new(300, 250), false);
+        e.on_up(Point::new(300, 250), false);
+        assert_eq!(e.picked, None);
+        // Drag the box's top edge by (50, 20): the box moves, the arrow stays.
+        drag(&mut e, (300, 200), (350, 220));
+        assert_eq!(e.picked, Some(0));
+        let Shape::Rect { a, b, .. } = e.doc.shapes()[0].clone() else { panic!("rect") };
+        assert_eq!((a.x - 200.5, a.y - 200.5, b.x - 400.5, b.y - 300.5), (50.0, 20.0, 50.0, 20.0));
+        assert!(matches!(e.doc.shapes()[1], Shape::Arrow { .. }));
+        // An arrow key nudges the picked shape by a pixel, Shift by ten.
+        e.on_key(VK_RIGHT, false, true);
+        let Shape::Rect { a, .. } = e.doc.shapes()[0].clone() else { panic!("rect") };
+        assert_eq!(a.x, 260.5);
+        // One undo per move.
+        e.on_key(0x5A, true, false);
+        e.on_key(0x5A, true, false);
+        let Shape::Rect { a, .. } = e.doc.shapes()[0].clone() else { panic!("rect") };
+        assert_eq!(a.x, 200.5, "two undos take back the nudge and the drag");
+        assert_eq!(e.picked, None, "undo drops the pick");
+        // Pick the arrow and delete it; undo brings it back.
+        e.on_down(Point::new(650, 550), false);
+        e.on_up(Point::new(650, 550), false);
+        assert_eq!(e.picked, Some(1));
+        assert_eq!(e.on_key(VK_DELETE, false, false), Effect::Redraw);
+        assert_eq!(e.doc.shapes().len(), 1);
+        assert_eq!(e.on_key(VK_ESCAPE, false, false), Effect::Close, "nothing picked: Esc closes");
+        e.on_key(0x5A, true, false);
+        assert_eq!(e.doc.shapes().len(), 2);
+    }
+
+    #[test]
+    fn a_shape_mid_drag_is_never_lost_from_the_picture() {
+        let base = Canvas::new(400, 200, Rgba::rgb(255, 255, 255));
+        let setup = || {
+            let mut e = selected((0, 0), (399, 199));
+            e.tool = Some(Tool::Rect);
+            drag(&mut e, (20, 20), (80, 80));
+            e.tool = Some(Tool::Rect);
+            drag(&mut e, (200, 20), (260, 80));
+            e.tool = Some(Tool::Select);
+            e
+        };
+        let shown = |e: &Editor| {
+            let mut cache = None;
+            e.update_doc(&mut cache, &BoxFont, &mut |_| Some(base.clone()));
+            cache.unwrap().img
+        };
+        // Copy while the box is still held: the box is in the picture, where it was dropped.
+        let mut e = setup();
+        e.on_down(Point::new(20, 50), false);
+        e.on_move(Point::new(40, 50), false);
+        assert_eq!(e.on_key(VK_RETURN, false, false), Effect::Copy);
+        assert!(e.drag.is_none());
+        assert_eq!(e.doc.shapes().len(), 2);
+        let Shape::Rect { a, .. } = e.doc.shapes()[0].clone() else { panic!("rect") };
+        assert_eq!(a.x, 40.5, "the move is kept");
+        assert_ne!(shown(&e).get(40, 50), Rgba::rgb(255, 255, 255), "and the box is drawn");
+        // Undo while the second box is held: the move is dropped, no shape is written over.
+        let mut e = setup();
+        e.on_down(Point::new(200, 50), false);
+        e.on_move(Point::new(230, 50), false);
+        e.on_key(0x5A, true, false);
+        e.on_up(Point::new(230, 50), false);
+        assert_eq!(e.doc.shapes().len(), 1, "undo took back the second box");
+        let Shape::Rect { a, .. } = e.doc.shapes()[0].clone() else { panic!("rect") };
+        assert_eq!(a.x, 20.5, "the first box is untouched");
+        // Esc while held: the box goes back and is drawn again.
+        let mut e = setup();
+        e.on_down(Point::new(20, 50), false);
+        e.on_move(Point::new(60, 50), false);
+        assert_eq!(e.on_key(VK_ESCAPE, false, false), Effect::Redraw);
+        assert!(e.drag.is_none());
+        assert_ne!(shown(&e).get(20, 50), Rgba::rgb(255, 255, 255));
+        let rev = e.rev;
+        // A right-click drops the tool and the pick; Delete then does nothing.
+        e.on_down(Point::new(20, 50), false);
+        e.on_up(Point::new(20, 50), false);
+        assert_eq!(e.picked, Some(0));
+        e.drop_tool();
+        assert_eq!(e.picked, None);
+        assert!(e.rev > rev);
+        e.on_key(VK_DELETE, false, false);
+        assert_eq!(e.doc.shapes().len(), 2);
+    }
+
+    #[test]
+    fn a_moved_shape_is_drawn_once_and_the_pick_box_stays_out_of_the_result() {
+        let mut e = selected((0, 0), (199, 99));
+        e.tool = Some(Tool::Rect);
+        drag(&mut e, (20, 20), (60, 60));
+        e.tool = Some(Tool::Select);
+        e.on_down(Point::new(20, 40), false);
+        e.on_move(Point::new(120, 40), false);
+        assert_eq!(e.hidden(), Some(0), "the document image leaves the moved shape out");
+        let base = Canvas::new(200, 100, Rgba::rgb(255, 255, 255));
+        let live = e.compose(&base, &BoxFont, true);
+        assert_eq!(live.get(20, 40), Rgba::rgb(255, 255, 255), "not at the old place");
+        assert_ne!(live.get(120, 40), Rgba::rgb(255, 255, 255), "at the new place");
+        e.on_up(Point::new(120, 40), false);
+        assert_eq!(e.picked, Some(0));
+        let result = e.compose_doc(&base, &BoxFont);
+        let preview = e.compose(&base, &BoxFont, true);
+        // The pick box sits 3 px outside the shape's bounds: only in the preview.
+        let b = pick_box(&e.doc.shapes()[0], &BoxFont, e.dip(3.0));
+        let (x, y) = (b.x0 - 1, 40);
+        assert_eq!(result.get(x, y), Rgba::rgb(255, 255, 255));
+        assert_ne!(preview.get(x, y), Rgba::rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn a_spotlight_darkens_the_screenshot_but_not_the_annotations() {
+        let mut e = selected((0, 0), (199, 99));
+        e.tool = Some(Tool::Line);
+        drag(&mut e, (10, 80), (190, 80));
+        let red = e.color;
+        let base = Canvas::new(200, 100, Rgba::rgb(255, 255, 255));
+        e.tool = Some(Tool::Spotlight);
+        // While dragging, the preview already keeps the line bright.
+        e.on_down(Point::new(60, 10), false);
+        e.on_move(Point::new(140, 50), false);
+        let live = e.compose(&base, &BoxFont, true);
+        assert_eq!(live.get(100, 80), red, "the line outside the lit box stays its colour");
+        assert!(live.get(5, 5).r < 200, "the screenshot outside goes dark");
+        e.on_up(Point::new(140, 50), false);
+        let done = e.compose_doc(&base, &BoxFont);
+        assert_eq!(done.get(100, 80), red);
+        assert_eq!(done.get(100, 30), Rgba::rgb(255, 255, 255), "inside the lit box");
+        // The same through the cached document image the overlay uses.
+        let mut cache = None;
+        assert!(e.update_doc(&mut cache, &BoxFont, &mut |_| Some(base.clone())));
+        assert_eq!(cache.unwrap().img, done);
+    }
+
+    #[test]
+    fn the_picker_reads_a_pixel_then_gives_the_tool_back() {
+        let mut e = selected((100, 100), (900, 700));
+        e.tool = Some(Tool::Marker);
+        assert_eq!(e.on_key(0x49, false, false), Effect::Redraw); // I
+        assert_eq!(e.tool, Some(Tool::Picker));
+        assert!(e.wants_loupe(), "the magnifier shows while the picker is out");
+        // A press anywhere on the frozen screen asks the overlay for that pixel.
+        assert_eq!(e.on_down_mods(Point::new(50, 60), false, false, &BoxFont), Effect::PickColor { at: Point::new(50, 60), copy: false });
+        assert_eq!(e.on_down_mods(Point::new(50, 60), true, false, &BoxFont), Effect::PickColor { at: Point::new(50, 60), copy: true });
+        assert_eq!(e.picked_color(Rgba::rgb(0x2D, 0xA4, 0x4E)), Effect::Redraw);
+        assert_eq!(e.tool, Some(Tool::Marker), "back to the highlighter");
+        assert_eq!(e.marker_color, Rgba::rgb(0x2D, 0xA4, 0x4E), "the highlighter takes the colour");
+        assert!(!e.wants_loupe());
+        // From the arrow it sets the ink.
+        e.tool = Some(Tool::Arrow);
+        e.on_key(0x49, false, false);
+        e.picked_color(Rgba::rgb(1, 2, 3).with_alpha(9));
+        assert_eq!((e.tool, e.color), (Some(Tool::Arrow), Rgba::rgb(1, 2, 3)));
+    }
+
+    #[test]
+    fn the_magnifier_shows_while_picking_the_area() {
+        let mut e = ed();
+        assert!(e.wants_loupe());
+        drag(&mut e, (100, 100), (899, 699));
+        assert!(!e.wants_loupe(), "editing with a drawing tool: no magnifier");
+    }
+
+    /// The reader of 0.3, as released: unknown keys are an error there, and an error resets
+    /// colour, size and blur.
+    #[derive(Debug, Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct PrefsV03 {
+        schema: u32,
+        color: String,
+        size: usize,
+        blur: bool,
+    }
+
+    impl Default for PrefsV03 {
+        fn default() -> Self {
+            Self { schema: 1, color: String::new(), size: 1, blur: false }
+        }
+    }
+
+    #[test]
+    fn the_editor_file_stays_readable_by_0_3_and_reads_newer_files() {
+        let p = Prefs { color: "#2DA44E".into(), size: 2, blur: true, frame: true, ..Prefs::default() };
+        let old = toml::from_str::<PrefsV03>(&p.to_text()).expect("0.3 reads what 0.4 writes");
+        assert_eq!((old.color.as_str(), old.size, old.blur), ("#2DA44E", 2, true));
+        // A newer snip's extra key in editor.toml (or a hand edit) does not reset anything here.
+        let newer = format!("{}glow = 3\n", p.to_text());
+        let q = Prefs::parse(&newer);
+        assert_eq!((q.color.as_str(), q.size, q.blur), ("#2DA44E", 2, true));
+        assert!(Prefs::parse_with(&newer, "frame = true\nshadow = \"soft\"\n").frame);
+        // A 0.3 file with no extra file: frame is off.
+        assert!(!Prefs::parse_with("schema = 1\ncolor = \"#2DA44E\"\nsize = 2\nblur = true\n", "").frame);
+    }
+
+    #[test]
+    fn frame_is_a_toggle_and_is_remembered() {
+        let mut e = selected((100, 100), (900, 700));
+        assert!(!e.frame);
+        assert_eq!(click_item(&mut e, Item::Frame), Effect::Redraw);
+        assert!(e.frame);
+        let p = e.prefs();
+        assert!(p.frame);
+        assert!(p.extra_text().contains("frame = true"));
+        assert_eq!(Prefs::parse_with(&p.to_text(), &p.extra_text()), p);
+        assert!(!Prefs::parse(&p.to_text()).frame, "editor.toml alone does not carry it");
+        assert!(!Prefs::parse_with(&p.to_text(), "frame = [").frame, "a broken extra file only loses its keys");
+        let f = Editor::new(mixed_example(), vec![], Theme::new(Look::Graphite, Mode::Light), &p, Point::new(0, 0));
+        assert!(f.frame);
+        let (_, bar) = e.bar().unwrap();
+        assert!(bar.button(Item::Frame).is_some());
+    }
+
+    #[test]
     fn plain_corners_and_edges_use_every_active_tool() {
-        for tool in toolbar::TOOLS {
+        // Every tool that puts something on the picture; select and picker have their own tests.
+        for tool in toolbar::TOOLS.into_iter().filter(|t| !matches!(t, Tool::Select | Tool::Picker)) {
             for point in [
                 (100, 100),
                 (899, 699),

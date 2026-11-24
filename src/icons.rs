@@ -39,9 +39,14 @@ pub enum Icon {
     Check,
     /// Text capture: selection corners around a T.
     TextCopy,
+    Ellipse,
+    Spotlight,
+    Select,
+    Picker,
+    Frame,
 }
 
-pub const ALL: [Icon; 27] = [
+pub const ALL: [Icon; 32] = [
     Icon::Region,
     Icon::Window,
     Icon::Screen,
@@ -69,6 +74,11 @@ pub const ALL: [Icon; 27] = [
     Icon::Trash,
     Icon::Check,
     Icon::TextCopy,
+    Icon::Ellipse,
+    Icon::Spotlight,
+    Icon::Select,
+    Icon::Picker,
+    Icon::Frame,
 ];
 
 /// One drawing step in grid units. `w` multiplies the 1.5 unit stroke.
@@ -101,6 +111,18 @@ fn fill_rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Prim {
     Prim::Fill { pts: vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)] }
 }
 
+/// An ellipse as a closed polygon (36 points, quarter-unit precision so the SVG stays short).
+fn ellipse(c: (f32, f32), rx: f32, ry: f32) -> Prim {
+    let q = |v: f32| (v * 4.0).round() / 4.0;
+    let pts: Vec<(f32, f32)> = (0..36)
+        .map(|i| {
+            let a = (i as f32 * 10.0).to_radians();
+            (q(c.0 + rx * a.cos()), q(c.1 + ry * a.sin()))
+        })
+        .collect();
+    Prim::Poly { pts, closed: true, w: 1.0 }
+}
+
 impl Icon {
     pub fn id(self) -> &'static str {
         match self {
@@ -131,6 +153,11 @@ impl Icon {
             Icon::Trash => "trash",
             Icon::Check => "check",
             Icon::TextCopy => "text-copy",
+            Icon::Ellipse => "ellipse",
+            Icon::Spotlight => "spotlight",
+            Icon::Select => "select",
+            Icon::Picker => "picker",
+            Icon::Frame => "frame",
         }
     }
 
@@ -233,6 +260,26 @@ impl Icon {
                 poly(&[(6.5, 7.0), (13.5, 7.0)]),
                 poly(&[(10.0, 7.0), (10.0, 13.5)]),
             ],
+            Icon::Ellipse => vec![ellipse((10.0, 10.0), 7.0, 5.25)],
+            // A lit square in a dimmed field: the field's corners, the lit box drawn whole.
+            Icon::Spotlight => vec![
+                rect(7.0, 7.0, 13.0, 13.0),
+                poly(&[(3.0, 6.0), (3.0, 3.0), (6.0, 3.0)]),
+                poly(&[(14.0, 3.0), (17.0, 3.0), (17.0, 6.0)]),
+                poly(&[(17.0, 14.0), (17.0, 17.0), (14.0, 17.0)]),
+                poly(&[(6.0, 17.0), (3.0, 17.0), (3.0, 14.0)]),
+                Prim::Dot { c: (10.0, 10.0), r: 1.2 },
+            ],
+            // The pointer: a classic arrow cursor outline.
+            Icon::Select => vec![closed(&[(5.0, 3.0), (5.0, 15.5), (8.25, 12.5), (10.5, 17.0), (12.5, 16.0), (10.25, 11.5), (14.5, 11.5)])],
+            // An eyedropper: the bulb, the collar and the glass tube to the tip.
+            Icon::Picker => vec![
+                poly(&[(11.0, 5.0), (15.0, 9.0)]),
+                closed(&[(12.5, 3.5), (14.0, 2.5), (17.5, 6.0), (16.5, 7.5)]),
+                poly(&[(13.0, 7.0), (6.0, 14.0), (4.5, 16.5), (3.5, 16.5), (3.5, 15.5), (6.0, 14.0)]),
+            ],
+            // A picture on a ground: the outer frame and the picture inside it.
+            Icon::Frame => vec![rect(2.5, 3.5, 17.5, 16.5), rect(6.0, 7.0, 14.0, 13.0)],
         }
     }
 }

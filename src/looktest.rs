@@ -187,6 +187,11 @@ fn panels(scene: &[u8], w: u32, h: u32, t: Theme, tag: &str, dir: &Path) -> Resu
     write(&settingsview::render(&l, &t, lang(), &c, &st, &g), "settings-hover")?;
     let base = ViewState { recording: Some(KeyField::Editor), hover: None, message: Some((pick_text("Başka bir program kullanıyor", "Another program uses it"), true)), folder_text: pick_text("Ekran Görüntüleri (Windows varsayılanı)", "Screenshots (Windows default)"), autostart: false, language_text: pick_text("Otomatik (Windows dili)", "Automatic (Windows language)") };
     write(&settingsview::render(&l, &t, lang(), &c, &base, &g), "settings-recording")?;
+    // The recording control beside the area, on the scene.
+    let ctl = crate::record::render_control(83_000, pick_text("Durdur", "Stop"), &t, 1.0, &g);
+    let mut bg = full.crop(crate::raster::IBox::new(200, 120, 200 + ctl.w as i32 + 48, 120 + ctl.h as i32 + 48));
+    bg.draw(&ctl, 24, 24);
+    write(&bg, "record-control")?;
     // Result cards, on the scene, so the corners and the border show on something.
     use crate::textcore::TextOutcome;
     let sample = if lang() == Lang::En { "A security update was installed for company staff.\r\nThe meeting is on Wednesday at 14:30 in the Istanbul office." } else { "Şirket çalışanları için güvenlik güncellemesi yüklendi.\r\nGörüşme Çarşamba günü saat 14:30'da İstanbul ofisinde." };
@@ -253,6 +258,35 @@ fn one_theme(hinst: windows::Win32::Foundation::HINSTANCE, scene: &[u8], w: u32,
         save(&ov, dir, &format!("{tag}-text-drag"))?;
         ov.on_mouse_mods(0, WM_MOUSEMOVE, 168, 137, false, false);
         save(&ov, dir, &format!("{tag}-text-toosmall"))?;
+    }
+    // Picking the area to record: the hint, then a drag.
+    {
+        let mut opts = Opts::plain(0.45);
+        opts.theme = t;
+        opts.lang = lang();
+        let mut ov = Overlay::new(snapshot(scene, w, h, dpi)?, hinst, &opts).map_err(|e| e.to_string())?;
+        ov.no_throttle = true;
+        ov.set_record_mode();
+        ov.on_mouse_mods(0, WM_MOUSEMOVE, 1010, 620, false, false);
+        save(&ov, dir, &format!("{tag}-record-pick"))?;
+    }
+    // The recording control as its real window draws it (GDI, through WM_PRINTCLIENT), next to
+    // the core's drawing of the same control: the two must match.
+    {
+        let k = dpi as f32 / 96.0;
+        let area = Rect::new((300.0 * k) as i32, (300.0 * k) as i32, (700.0 * k) as i32, (500.0 * k) as i32);
+        let stop = pick_text("Durdur", "Stop");
+        let (r, win) = crate::record_win::look_indicator(t, k, stop, 83_000, area, Rect::new(0, 0, w as i32, h as i32)).ok_or("record control window")?;
+        let core = crate::record::render_control(83_000, stop, &t, k, &crate::gdi::GdiGlyphs::new());
+        if (win.w, win.h) != (core.w, core.h) || win.px != core.px {
+            return Err(format!("record control window {}x{} differs from the core drawing {}x{}", win.w, win.h, core.w, core.h));
+        }
+        let mut bg = Canvas::from_bgra(w, h, scene.to_vec());
+        bg.draw(&win, r.left, r.top);
+        let crop = bg.crop(crate::raster::IBox::new(r.left - 20, r.top - 20, area.right + 20, area.bottom + 20));
+        let png = crate::png::encode_png(crop.w, crop.h, &crop.px).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(format!("{tag}-record-window.png")), png).map_err(|e| e.to_string())?;
+        println!("wrote {tag}-record-window.png (window pixels equal the core drawing)");
     }
     // The mode bar offers text too.
     {

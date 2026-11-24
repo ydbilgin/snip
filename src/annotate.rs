@@ -15,6 +15,8 @@ pub enum ObscureMode {
 pub enum Shape {
     Arrow { a: Pt, b: Pt, color: Rgba, width: f32 },
     Rect { a: Pt, b: Pt, color: Rgba, width: f32 },
+    /// The ellipse inside the box from `a` to `b` (Shift: a circle).
+    Ellipse { a: Pt, b: Pt, color: Rgba, width: f32 },
     Line { a: Pt, b: Pt, color: Rgba, width: f32 },
     Pen { pts: Vec<Pt>, color: Rgba, width: f32 },
     Marker { pts: Vec<Pt>, color: Rgba, width: f32 },
@@ -24,14 +26,78 @@ pub enum Shape {
     Step { at: Pt, n: u32, color: Rgba, r: f32 },
     /// `strength`: block size (pixelate) or radius (blur) in pixels.
     Obscure { a: Pt, b: Pt, mode: ObscureMode, strength: f32 },
+    /// Everything outside the box from `a` to `b` goes darker; the box keeps its pixels.
+    Spotlight { a: Pt, b: Pt },
 }
 
+/// A box larger than any desktop: a spotlight changes every pixel outside its own box.
+const EVERYWHERE: IBox = IBox::new(-(1 << 24), -(1 << 24), 1 << 24, 1 << 24);
+
 impl Shape {
+    /// The same shape `d` pixels further on (the select tool moves shapes with this).
+    pub fn translated(&self, d: Pt) -> Shape {
+        let mut s = self.clone();
+        match &mut s {
+            Shape::Arrow { a, b, .. }
+            | Shape::Rect { a, b, .. }
+            | Shape::Ellipse { a, b, .. }
+            | Shape::Line { a, b, .. }
+            | Shape::Obscure { a, b, .. }
+            | Shape::Spotlight { a, b } => {
+                *a = a.plus(d);
+                *b = b.plus(d);
+            }
+            Shape::Pen { pts, .. } | Shape::Marker { pts, .. } => {
+                for p in pts {
+                    *p = p.plus(d);
+                }
+            }
+            Shape::Text { at, .. } | Shape::Step { at, .. } => *at = at.plus(d),
+        }
+        s
+    }
+
+    /// Whether a press at `p` picks this shape: on its stroke (within `slop` pixels), inside a
+    /// badge, a text box, a pixelated area or a spotlight's box.
+    pub fn hit(&self, p: Pt, slop: f32, glyphs: &dyn Glyphs) -> bool {
+        let near = |d: f32, width: f32| d <= width / 2.0 + slop;
+        match self {
+            Shape::Arrow { a, b, width, .. } | Shape::Line { a, b, width, .. } => near(crate::raster::dist_to_segment(p, *a, *b), *width),
+            Shape::Rect { a, b, width, .. } => {
+                let (c, half) = (Pt::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), Pt::new((a.x - b.x).abs() / 2.0, (a.y - b.y).abs() / 2.0));
+                near(crate::raster::sd_box(p.minus(c), half).abs(), *width)
+            }
+            // Its edge only: the inside belongs to whatever the spotlight shows.
+            Shape::Spotlight { a, b } => {
+                let (c, half) = (Pt::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), Pt::new((a.x - b.x).abs() / 2.0, (a.y - b.y).abs() / 2.0));
+                near(crate::raster::sd_box(p.minus(c), half).abs(), 2.0)
+            }
+            Shape::Ellipse { a, b, width, .. } => {
+                let (c, r) = ellipse_of(*a, *b);
+                near(crate::raster::sd_ellipse(p.minus(c), r).abs(), *width)
+            }
+            Shape::Pen { pts, width, .. } | Shape::Marker { pts, width, .. } => match pts.as_slice() {
+                [] => false,
+                [q] => near(q.dist(p), *width),
+                _ => pts.windows(2).any(|w| near(crate::raster::dist_to_segment(p, w[0], w[1]), *width)),
+            },
+            Shape::Text { .. } => text_bounds(self, glyphs).is_some_and(|r| {
+                let s = slop.round() as i32;
+                IBox::new(r.x0 - s, r.y0 - s, r.x1 + s, r.y1 + s).contains(p.x.floor() as i32, p.y.floor() as i32)
+            }),
+            Shape::Step { at, r, .. } => at.dist(p) <= r + slop,
+            Shape::Obscure { a, b, .. } => {
+                p.x >= a.x.min(b.x) && p.x <= a.x.max(b.x) && p.y >= a.y.min(b.y) && p.y <= a.y.max(b.y)
+            }
+        }
+    }
+
     /// Pixel bounds of everything the shape may change (for partial redraws and tests).
     pub fn bounds(&self) -> IBox {
         match self {
             Shape::Arrow { a, b, width, .. } => IBox::around(a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y), arrow_head(*width) + width),
-            Shape::Rect { a, b, width, .. } | Shape::Line { a, b, width, .. } => IBox::around(a.x, a.y, b.x, b.y, width / 2.0 + 1.0),
+            Shape::Rect { a, b, width, .. } | Shape::Ellipse { a, b, width, .. } | Shape::Line { a, b, width, .. } => IBox::around(a.x, a.y, b.x, b.y, width / 2.0 + 1.0),
+            Shape::Spotlight { .. } => EVERYWHERE,
             Shape::Pen { pts, width, .. } | Shape::Marker { pts, width, .. } => {
                 let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
                 for p in pts {
@@ -102,12 +168,17 @@ impl Shape {
     pub fn is_degenerate(&self) -> bool {
         match self {
             Shape::Arrow { a, b, .. } | Shape::Line { a, b, .. } => a.dist(*b) < 3.0,
-            Shape::Rect { a, b, .. } | Shape::Obscure { a, b, .. } => (a.x - b.x).abs() < 3.0 || (a.y - b.y).abs() < 3.0,
+            Shape::Rect { a, b, .. } | Shape::Ellipse { a, b, .. } | Shape::Obscure { a, b, .. } | Shape::Spotlight { a, b } => (a.x - b.x).abs() < 3.0 || (a.y - b.y).abs() < 3.0,
             Shape::Pen { pts, .. } | Shape::Marker { pts, .. } => pts.is_empty(),
             Shape::Text { text, .. } => text.trim().is_empty(),
             Shape::Step { .. } => false,
         }
     }
+}
+
+/// Centre and radii of the ellipse inside the box from `a` to `b`.
+pub fn ellipse_of(a: Pt, b: Pt) -> (Pt, Pt) {
+    (Pt::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), Pt::new((a.x - b.x).abs() / 2.0, (a.y - b.y).abs() / 2.0))
 }
 
 /// Length of the arrow head for a shaft `width` wide.
@@ -309,10 +380,31 @@ fn render_clipped(img: &mut Canvas, origin: (i32, i32), shapes: &[Shape], clip: 
                 m.box_outline(a.x, a.y, b.x, b.y, *width);
                 img.blend_mask(&m, *color);
             }
+            Shape::Ellipse { a, b, color, width } => {
+                let mut m = Mask::new(mbox);
+                let (c, r) = ellipse_of(l(a), l(b));
+                m.ellipse_outline(c, r, *width);
+                img.blend_mask(&m, *color);
+            }
             Shape::Line { a, b, color, width } => {
                 let mut m = Mask::new(mbox);
                 m.capsule(l(a), l(b), *width);
                 img.blend_mask(&m, *color);
+            }
+            Shape::Spotlight { a, b } => {
+                // Coverage of the lit box (soft, rounded corners); everything else is darkened.
+                let (a, b) = (l(a), l(b));
+                let mut lit = Mask::new(mbox);
+                lit.rounded_box(a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y), crate::theme::SPOTLIGHT_RADIUS);
+                let dim = crate::theme::DIM_COLOR.with_alpha(crate::theme::SPOTLIGHT_DIM);
+                for y in mbox.y0..mbox.y1 {
+                    for x in mbox.x0..mbox.x1 {
+                        let k = 1.0 - lit.at(x, y) as f32 / 255.0;
+                        if k > 0.0 {
+                            img.blend(x, y, dim, k);
+                        }
+                    }
+                }
             }
             Shape::Pen { pts, color, width } => {
                 let mut m = Mask::new(mbox);
@@ -531,6 +623,62 @@ mod tests {
         render(&mut img, (0, 0), &[Shape::Step { at: Pt::new(30.0, 30.0), n: 7, color: RED, r: 16.0 }], &BoxFont);
         assert_eq!(img.get(30, 16), RED, "disc");
         assert_eq!(img.get(30, 30), WHITE, "the number's box font glyph in white");
+    }
+
+    #[test]
+    fn ellipse_draws_its_outline_only() {
+        let mut img = Canvas::new(120, 80, WHITE);
+        let s = Shape::Ellipse { a: Pt::new(10.0, 10.0), b: Pt::new(110.0, 70.0), color: RED, width: 4.0 };
+        render(&mut img, (0, 0), std::slice::from_ref(&s), &BoxFont);
+        assert_eq!(img.get(60, 40), WHITE, "the middle stays clear");
+        assert_eq!(img.get(10, 40), RED, "left end of the long axis");
+        assert_eq!(img.get(60, 10), RED, "top end of the short axis");
+        assert_eq!(img.get(12, 12), WHITE, "the box corner is outside the ellipse");
+        assert!(!s.is_degenerate());
+        assert!(Shape::Ellipse { a: Pt::new(0.0, 0.0), b: Pt::new(50.0, 1.0), color: RED, width: 2.0 }.is_degenerate());
+    }
+
+    #[test]
+    fn spotlight_darkens_only_outside_its_box() {
+        let mut img = Canvas::new(100, 60, WHITE);
+        let s = Shape::Spotlight { a: Pt::new(30.0, 20.0), b: Pt::new(70.0, 40.0) };
+        render(&mut img, (0, 0), std::slice::from_ref(&s), &BoxFont);
+        assert_eq!(img.get(50, 30), WHITE, "the lit box keeps its pixels");
+        let out = img.get(5, 5);
+        assert!(out.r < 140 && out.r == out.g && out.g == out.b, "outside goes darker, no tint: {out:?}");
+        // Partial redraws give the same pixels as a full render.
+        let mut part = Canvas::new(100, 60, WHITE);
+        render_in(&mut part, (0, 0), &s, IBox::new(0, 0, 50, 60), &BoxFont);
+        render_in(&mut part, (0, 0), &s, IBox::new(50, 0, 100, 60), &BoxFont);
+        assert_eq!(part, img);
+        assert_eq!(s.bounds().intersect(&IBox::new(0, 0, 100, 60)), IBox::new(0, 0, 100, 60), "it touches the whole picture");
+    }
+
+    #[test]
+    fn shapes_move_and_answer_to_a_press_on_them() {
+        let d = Pt::new(10.0, -5.0);
+        let shapes = [
+            Shape::Arrow { a: Pt::new(0.0, 0.0), b: Pt::new(100.0, 0.0), color: RED, width: 4.0 },
+            Shape::Rect { a: Pt::new(0.0, 0.0), b: Pt::new(100.0, 50.0), color: RED, width: 4.0 },
+            Shape::Ellipse { a: Pt::new(0.0, 0.0), b: Pt::new(100.0, 50.0), color: RED, width: 4.0 },
+            Shape::Pen { pts: vec![Pt::new(0.0, 0.0), Pt::new(50.0, 50.0)], color: RED, width: 4.0 },
+            Shape::Step { at: Pt::new(20.0, 20.0), n: 1, color: RED, r: 12.0 },
+            Shape::Obscure { a: Pt::new(0.0, 0.0), b: Pt::new(40.0, 40.0), mode: ObscureMode::Blur, strength: 4.0 },
+            Shape::Spotlight { a: Pt::new(0.0, 0.0), b: Pt::new(40.0, 40.0) },
+            Shape::Text { at: Pt::new(0.0, 0.0), text: "hi".into(), color: RED, size: 20.0 },
+        ];
+        let on = [Pt::new(50.0, 1.0), Pt::new(50.0, 1.0), Pt::new(50.0, 1.0), Pt::new(25.0, 26.0), Pt::new(25.0, 25.0), Pt::new(20.0, 20.0), Pt::new(40.0, 20.0), Pt::new(5.0, 10.0)];
+        for (s, p) in shapes.iter().zip(on) {
+            assert!(s.hit(p, 3.0, &BoxFont), "{s:?} at {p:?}");
+            let m = s.translated(d);
+            assert!(m.hit(p.plus(d), 3.0, &BoxFont), "moved {s:?}");
+            assert_eq!(m.translated(Pt::new(-10.0, 5.0)), *s, "moves back exactly");
+        }
+        // Outline shapes are picked on their line, not in their empty middle; a spotlight likewise.
+        for s in [&shapes[1], &shapes[2], &shapes[6]] {
+            let mid = if matches!(s, Shape::Spotlight { .. }) { Pt::new(20.0, 20.0) } else { Pt::new(50.0, 25.0) };
+            assert!(!s.hit(mid, 3.0, &BoxFont), "{s:?}");
+        }
     }
 
     #[test]

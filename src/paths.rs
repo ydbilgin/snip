@@ -64,6 +64,11 @@ pub fn editor_prefs_file() -> PathBuf {
     state_dir().join("editor.toml")
 }
 
+/// The editor keys newer than 0.3 (the frame), kept apart so 0.3 can still read `editor.toml`.
+pub fn editor_extra_file() -> PathBuf {
+    state_dir().join("editor-extra.toml")
+}
+
 /// Pinned images when the history is off (deleted when the pin closes).
 pub fn pins_dir() -> PathBuf {
     state_dir().join("pins")

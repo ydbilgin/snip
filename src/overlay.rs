@@ -174,6 +174,8 @@ pub struct Overlay {
     frame: Option<Frame>,
     /// CPU copies of the monitors under the selection, kept only while it is being moved or resized.
     cpu_frames: Vec<Option<Vec<u8>>>,
+    /// Whole monitors in memory for the magnifier while it shows (dropped when it goes).
+    loupe_frames: Vec<Option<Vec<u8>>>,
     ui: Vec<Placed>,
     /// Rectangles drawn last frame (for partial redraws).
     shown: Vec<Rect>,
@@ -309,6 +311,7 @@ impl Overlay {
                 comp: None,
                 frame: None,
                 cpu_frames: Vec::new(),
+                loupe_frames: Vec::new(),
                 ui: Vec::new(),
                 shown: Vec::new(),
                 focused: false,
@@ -372,7 +375,7 @@ impl Overlay {
                 if let Some(m) = ov.mons.at(ov.cursor).or(ov.mons.list.first()).copied() {
                     let bar = Bar::layout(&toolbar::mode_slots_with(o.text_action), &ov.theme, m.scale());
                     let at = Point::new(m.rect.left + (m.rect.width() - bar.w) / 2, m.rect.top + m.px(crate::theme::MODE_BAR_TOP));
-                    let hint = toolbar::render_text_hint(crate::i18n::S::PlainHint.get(ov.lang), &[], &ov.theme, m.scale(), &ov.glyphs);
+                    let hint = toolbar::render_plain_hint(ov.lang, &ov.theme, m.scale(), &ov.glyphs, m.rect.width() - 2 * m.px(crate::theme::MODE_BAR_TOP));
                     let hint_at = Point::new(m.rect.left + (m.rect.width() - hint.w as i32) / 2, at.y + bar.h + m.px(crate::theme::SELECTION_LABEL_GAP));
                     ov.plain_hint = ov.placed(hint_at, &hint);
                     ov.mode_bar = Some((at, bar));
@@ -553,12 +556,35 @@ impl Overlay {
         Some(Placed { at: Point::new(at.x - s.margin.0, at.y - s.margin.1), w: s.size.0, h: s.size.1, bmp: s.bmp.clone() })
     }
 
+    /// The magnifier next to the cursor, when the editor wants it (`loupe.rs`).
+    pub(crate) fn loupe_canvas(&mut self) -> Option<(Point, Canvas)> {
+        if !self.editor.as_ref().is_some_and(|e| e.wants_loupe()) {
+            self.loupe_frames.clear();
+            return None;
+        }
+        let p = self.cursor;
+        let m = self.mons.at(p).copied()?;
+        let got = self.snap.layout.clip(&crate::loupe::sample_rect(p))?;
+        let (w, h, px) = self.snap.crop_cached(&got, &mut self.loupe_frames).ok()?;
+        let square = crate::loupe::square(p, got, &Canvas::from_bgra(w, h, px));
+        let cv = crate::loupe::render(&square, p, &self.theme, m.scale(), &self.glyphs);
+        let at = crate::loupe::place(p, cv.w as i32, cv.h as i32, m.rect, m.px(crate::theme::LOUPE_OFFSET));
+        Some((at, cv))
+    }
+
+    /// One pixel of the frozen screen (the colour picker reads the screen, not the drawing).
+    pub fn frozen_pixel(&self, p: Point) -> Option<crate::raster::Rgba> {
+        let (_, _, px) = self.snap.crop(&Rect::from_xywh(p.x, p.y, 1, 1)).ok()?;
+        (px.len() >= 4).then(|| crate::raster::Rgba::rgb(px[2], px[1], px[0]))
+    }
+
     /// Re-render the bars and labels (core canvases) as bitmaps.
     fn rebuild_ui(&mut self) {
         let mut ui = Vec::new();
+        let loupe = self.loupe_canvas();
         if let Some(e) = &self.editor {
             let v = e.view(&self.glyphs);
-            for (floating, item) in [(true, v.bar), (true, v.palette), (true, v.size_menu), (false, v.label), (false, v.tooltip)] {
+            for (floating, item) in [(true, v.bar), (true, v.palette), (true, v.size_menu), (false, v.label), (false, v.tooltip), (true, loupe)] {
                 let Some((at, cv)) = item else { continue };
                 if floating && let Some(s) = self.shadow(at, cv.w as i32, cv.h as i32) {
                     ui.push(s);
@@ -576,7 +602,15 @@ impl Overlay {
                     let y = (r.top-cv.h as i32-6).clamp(m.rect.top,(m.rect.bottom-cv.h as i32).max(m.rect.top));
                     if let Some(p) = self.placed(Point::new(x,y),&cv) { ui.push(p); }
             }
-            if !self.is_text() && !self.record_mode && let Some(hint) = &self.plain_hint { ui.push(hint.clone()); }
+            // The hint steps aside while a drag picks the area and while a mode button shows its name.
+            if !self.is_text() && !self.record_mode && self.drag.is_none() && self.bar_hover.is_none()
+                && let Some(hint) = self.plain_hint.clone() {
+                let r = hint.rect();
+                if let Some(s) = self.shadow(Point::new(r.left, r.top), r.width(), r.height()) {
+                    ui.push(s);
+                }
+                ui.push(hint);
+            }
             if let Some((at, bar)) = self.mode_bar.clone() {
                 let st = BarState { active: vec![self.mode], hover: self.bar_hover, ..Default::default() };
                 let cv = toolbar::render_bar(&bar, &self.theme, &st);
@@ -600,9 +634,10 @@ impl Overlay {
             }
             if self.record_mode
                 && let Some(m) = self.mons.at(self.cursor).or(self.mons.list.first()).copied() {
-                    let text = if self.lang == Lang::Tr { "Kaydedilecek alanı seç · Enter tüm ekran · Esc iptal" } else { "Pick the area to record · Enter full screen · Esc cancel" };
-                    let cv = toolbar::render_tooltip(text, &self.theme, m.scale(), &self.glyphs);
+                    // Same panel as the text hint: the sentence, then the keys as caps.
+                    let cv = toolbar::render_record_hint(self.lang, &self.theme, m.scale(), &self.glyphs);
                     let at = Point::new(m.rect.left + (m.rect.width() - cv.w as i32)/2, m.rect.top + m.px(crate::theme::MODE_BAR_TOP));
+                    if let Some(s) = self.shadow(at, cv.w as i32, cv.h as i32) { ui.push(s); }
                     if let Some(p) = self.placed(at, &cv) { ui.push(p); }
             }
             if self.is_text() && self.drag.is_none() {
@@ -728,7 +763,14 @@ impl Overlay {
         let e = self.editor.as_ref()?;
         // The overlay closes after this; the document image is the result, no further copy.
         let img = self.doc_cache.take()?.img;
-        Some((e.sel?, img, e.prefs()))
+        let sel = e.sel?;
+        if e.frame {
+            // The framed picture is larger: a pin keeps the screenshot where it was.
+            let pad = crate::beautify::FrameLayout::for_size(img.w, img.h, e.scale()).pad;
+            let framed = crate::beautify::apply(&img, e.scale());
+            return Some((Rect::new(sel.left - pad, sel.top - pad, sel.right + pad, sel.bottom + pad), framed, e.prefs()));
+        }
+        Some((sel, img, e.prefs()))
     }
 
     pub fn set_color(&mut self, c: crate::raster::Rgba) {
@@ -1082,6 +1124,16 @@ impl Overlay {
             Effect::CustomColor => {
                 self.refresh(true);
                 Outcome::CustomColor
+            }
+            Effect::PickColor { at, copy } => {
+                let Some(c) = self.frozen_pixel(at) else { return Outcome::Nothing };
+                if copy {
+                    // Shift+click: the hex goes to the clipboard as text, through the one text route.
+                    let outcome = crate::textclip::publish(self.owner(), &c.to_hex());
+                    crate::logf!("picker copied: {}", crate::textcore::TextOutcome::name_of_code(outcome.done_code()));
+                }
+                let eff = self.editor.as_mut().map(|e| e.picked_color(c)).unwrap_or(Effect::None);
+                self.effect(eff)
             }
             Effect::Close => Outcome::Cancel,
         }

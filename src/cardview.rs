@@ -43,6 +43,12 @@ pub fn content(o: &TextOutcome, lang: Lang) -> Option<CardContent> {
     })
 }
 
+/// The body of the all-screens card: "3840 × 1080 px, 2 screens".
+pub fn all_screens_body(w: u32, h: u32, screens: usize, lang: Lang) -> String {
+    let word = if screens == 1 { S::ScreenWord } else { S::ScreensWord };
+    format!("{w} \u{00D7} {h} px, {screens} {}", word.get(lang))
+}
+
 /// How long the card stays (WinTextCapture's numbers): longer for longer text.
 pub fn hold_ms(o: &TextOutcome) -> u32 {
     match o {

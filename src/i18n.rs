@@ -57,7 +57,14 @@ macro_rules! strings {
 }
 
 strings! {
-    PlainHint => "Enter full screen · Shift+Enter without taskbar · Shift+click add frame · Backspace remove last frame · Alt inner parts · wheel part level · Esc cancel", "Enter tam ekran · Shift+Enter görev çubuğu olmadan · Shift+tık çerçeve ekle · Backspace son çerçeveyi sil · Alt iç parçalar · tekerlek parça seviyesi · Esc iptal";
+    PlainHint => "Drag an area or click a window", "Bir alan sürükleyin ya da bir pencereye tıklayın";
+    PlainKeyFull => "full screen", "tam ekran";
+    RecordHint => "Pick the area to record", "Kaydedilecek alanı seçin";
+    PlainKeyWork => "without the taskbar", "görev çubuğu olmadan";
+    PlainKeyShiftClick => "Shift+click", "Shift+tık";
+    PlainKeyAdd => "add one more", "bir tane daha ekle";
+    PlainKeyRemove => "remove the last", "sonuncuyu sil";
+    PlainKeyParts => "inner parts (or the wheel)", "iç parçalar (ya da tekerlek)";
     // Plain snip mode bar
     ModeRegion => "Region", "Alan";
     ModeWindow => "Window", "Pencere";
@@ -72,6 +79,12 @@ strings! {
     ToolSteps => "Numbered steps", "Numaralı adımlar";
     ToolObscure => "Pixelate", "Pikselleştir";
     ToolBlur => "Blur", "Bulanıklaştır";
+    ToolSelect => "Select and move", "Seç ve taşı";
+    ToolEllipse => "Ellipse", "Elips";
+    ToolSpotlight => "Spotlight", "Spot ışığı";
+    ToolPicker => "Pick a colour", "Renk al";
+    FrameTip => "Frame the picture", "Resmi çerçevele";
+    PickedColor => "Colour", "Renk";
     Color => "Colour", "Renk";
     CustomColor => "Custom colour…", "Özel renk…";
     Size => "Size", "Boyut";
@@ -166,6 +179,7 @@ strings! {
     ToastAllFailed => "All screens could not be taken", "Tüm ekranlar alınamadı";
     ToastAllFailedBody => "The screens could not be read. Details are in the log.", "Ekranlar okunamadı. Ayrıntı günlükte.";
     ScreensWord => "screens", "ekran";
+    ScreenWord => "screen", "ekran";
     FnDelay => "Delayed snip", "Gecikmeli alıntı";
     FnDelayLine => "Gives you time to open a menu. When the time is up you choose the area.", "Bir menüyü açmanız için süre tanır. Süre bitince alanı seçersiniz.";
     FnText => "Copy text", "Metni kopyala";

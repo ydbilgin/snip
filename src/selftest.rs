@@ -337,7 +337,8 @@ fn editor_output() -> Result<String, String> {
     if inked < 50 || t.w < 60 {
         return Err(format!("GDI text too small: {}x{} with {inked} inked pixels", t.w, t.h));
     }
-    let mons = Monitors::new(vec![Monitor::new(Rect::from_xywh(-400, -300, 800, 600), 144)]);
+    // Wide enough for the whole bar in one row at 150 %: the drags below stay off it.
+    let mons = Monitors::new(vec![Monitor::new(Rect::from_xywh(-800, -600, 1600, 1200), 144)]);
     let theme = crate::theme::Theme::new(crate::theme::Look::Graphite, crate::theme::Mode::Dark);
     let mut e = Editor::new(mons, vec![], theme, &Prefs::default(), Point::new(0, 0));
     let drag = |e: &mut Editor, a: (i32, i32), b: (i32, i32)| {
@@ -380,6 +381,55 @@ fn editor_output() -> Result<String, String> {
         return Err("PNG round trip changed pixels".into());
     }
     Ok(format!("8 shapes at 150 %, {changed} pixels changed, PNG {} bytes, GDI text {}x{}", bytes.len(), t.w, t.h))
+}
+
+/// 2026-11-23: the new tools with the real GDI font at 150 %: ellipse and spotlight change the
+/// picture, the select tool moves a shape, the magnifier and the frame render, and the framed
+/// picture survives a PNG round trip.
+fn editor_v2() -> Result<String, String> {
+    use crate::annotate::Shape;
+    use crate::dpi::{Monitor, Monitors};
+    use crate::editor::{Editor, Prefs};
+    use crate::geometry::Point;
+    use crate::raster::{Canvas, Rgba};
+    let g = crate::gdi::GdiGlyphs::new();
+    let mons = Monitors::new(vec![Monitor::new(Rect::from_xywh(0, 0, 900, 600), 144)]);
+    let theme = crate::theme::Theme::new(crate::theme::Look::Graphite, crate::theme::Mode::Dark);
+    let mut e = Editor::new(mons, vec![], theme, &Prefs::default(), Point::new(0, 0));
+    let drag = |e: &mut Editor, a: (i32, i32), b: (i32, i32)| {
+        e.on_down(Point::new(a.0, a.1), false);
+        e.on_move(Point::new(b.0, b.1), false);
+        e.on_up(Point::new(b.0, b.1), false);
+    };
+    drag(&mut e, (50, 50), (649, 449));
+    e.on_key(b'E' as u32, false, false);
+    drag(&mut e, (100, 100), (300, 220));
+    e.on_key(b'F' as u32, false, false);
+    drag(&mut e, (350, 250), (550, 400));
+    let base = Canvas::new(600, 400, Rgba::rgb(240, 240, 240));
+    let img = e.compose(&base, &g, false);
+    let lit = img.get(450 - 50, 320 - 50) == base.get(0, 0);
+    let dimmed = img.get(10, 390).luminance() < base.get(0, 0).luminance() * 0.6;
+    if !(lit && dimmed) {
+        return Err(format!("spotlight: lit {lit}, dimmed {dimmed}"));
+    }
+    e.on_key(b'V' as u32, false, false);
+    drag(&mut e, (100, 160), (140, 160));
+    let moved = matches!(e.doc.shapes().first(), Some(Shape::Ellipse { a, .. }) if (a.x - 140.5).abs() < 1e-3);
+    if !moved {
+        return Err(format!("select tool did not move the ellipse: {:?}", e.doc.shapes().first()));
+    }
+    let mut sample = Canvas::new(crate::theme::LOUPE_PIXELS, crate::theme::LOUPE_PIXELS, Rgba::rgb(229, 56, 59));
+    sample.set(0, 0, Rgba::default());
+    let loupe = crate::loupe::render(&sample, Point::new(1234, 567), &theme, 1.5, &g);
+    let inked = loupe.px.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
+    let framed = crate::beautify::apply(&img, 1.5);
+    let bytes = crate::png::encode_png(framed.w, framed.h, &framed.px).map_err(|e| format!("encode: {e}"))?;
+    let (w, h, back) = crate::png::decode_png(&bytes).map_err(|e| format!("decode: {e}"))?;
+    if (w, h) != (framed.w, framed.h) || back != framed.px {
+        return Err("framed PNG round trip changed pixels".into());
+    }
+    Ok(format!("ellipse + spotlight, ellipse moved 40 px, magnifier {}x{} ({inked} px), frame {}x{} PNG {} bytes", loupe.w, loupe.h, framed.w, framed.h, bytes.len()))
 }
 
 /// v2: the history store in a temporary folder keeps 50 and deletes only its own files.
@@ -449,7 +499,7 @@ pub fn run() -> i32 {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
-    let checks: [Check; 16] = [
+    let checks: [Check; 17] = [
         ("geometry", || {
             let l = his_layout();
             let n = l.pieces(&l.bounds()).len();
@@ -471,6 +521,7 @@ pub fn run() -> i32 {
         ("direct2d", d2d_ready),
         ("folders", folders),
         ("editor-output", editor_output),
+        ("editor-v2-tools", editor_v2),
         ("history-store", history_store),
         ("hotkey-plan", hotkey_plan),
         ("all-screens-cpu", || all_screens(false)),
@@ -1165,12 +1216,22 @@ pub fn run_editor(isolated_clipboard: bool) -> i32 {
         let mut opts = Opts::plain(0.45); opts.editor = Some(Prefs::default());
         let mut ov = Overlay::new(snap, hinst, &opts).map_err(|e| e.to_string())?;
         // Keep all windows hidden. Methods below are the same production event path with explicit modifiers.
+        // v2: while picking the area the magnifier shows the frozen pixel under the cursor.
+        ov.on_mouse_mods(0, WM_MOUSEMOVE, 57, 61, false, false);
+        let want = ov.frozen_pixel(crate::geometry::Point::new(57, 61)).ok_or("no frozen pixel")?;
+        let (at, loupe) = ov.loupe_canvas().ok_or("no magnifier while selecting")?;
+        let t = crate::theme::Theme::new(crate::theme::Look::Graphite, crate::theme::Mode::Light);
+        let cell = (crate::theme::LOUPE_ZOOM).round() as i32;
+        let mid = (t.pad).round() as i32 + (crate::theme::LOUPE_PIXELS as i32 / 2) * cell + cell / 2;
+        let shown = loupe.get(mid, mid);
+        check("editor-v2-loupe", shown == want && at.x > 57 && at.y > 61, &format!("middle cell {} = frozen pixel at 57,61, panel at {},{}", shown.to_hex(), at.x, at.y))?;
         ov.on_mouse_mods(0, WM_LBUTTONDOWN, 100, 100, false, false);
         ov.on_mouse_mods(0, WM_MOUSEMOVE, 600, 450, false, false);
         ov.on_mouse_mods(0, WM_LBUTTONUP, 600, 450, false, false);
         let selected = Rect::new(100, 100, 601, 451);
         check("editor-selection", ov.editor.as_ref().is_some_and(|e| e.sel == Some(selected)), "inclusive 501x351 synthetic selection")?;
-        for tool in [Tool::Arrow, Tool::Rect, Tool::Line, Tool::Pen, Tool::Marker, Tool::Steps, Tool::Obscure] {
+        check("editor-v2-loupe-gone", ov.loupe_canvas().is_none(), "no magnifier once the area is picked and a drawing tool is out")?;
+        for tool in [Tool::Arrow, Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Pen, Tool::Marker, Tool::Steps, Tool::Spotlight, Tool::Obscure] {
             if ov.editor.as_ref().unwrap().tool != Some(tool) { ov.on_key_mods(tool.key() as u32, false, false); }
             let before = ov.editor.as_ref().unwrap().doc.shapes().len();
             ov.on_mouse_mods(0, WM_LBUTTONDOWN, 150, 150, false, false);
@@ -1179,6 +1240,25 @@ pub fn run_editor(isolated_clipboard: bool) -> i32 {
             let e = ov.editor.as_ref().unwrap();
             check(&format!("editor-plain-{:?}", tool), e.sel == Some(selected) && e.doc.shapes().len() > before, "plain left adds annotation without moving selection")?;
         }
+        // v2: the colour picker reads the frozen screen, then the tool before it comes back.
+        ov.on_key_mods(Tool::Picker.key() as u32, false, false);
+        let want = ov.frozen_pixel(crate::geometry::Point::new(420, 380)).ok_or("no frozen pixel")?;
+        ov.on_mouse_mods(0, WM_LBUTTONDOWN, 420, 380, false, false);
+        ov.on_mouse_mods(0, WM_LBUTTONUP, 420, 380, false, false);
+        let e = ov.editor.as_ref().unwrap();
+        check("editor-v2-picker", e.color == want && e.tool == Some(Tool::Obscure) && e.doc.shapes().len() == 9, &format!("ink {} from the frozen pixel, previous tool back, no shape added", want.to_hex()))?;
+        // v2: the select tool drags the topmost shape (the pixelated box) 40 px right; one undo puts it back.
+        ov.on_key_mods(Tool::Select.key() as u32, false, false);
+        let before = ov.editor.as_ref().unwrap().doc.shapes().to_vec();
+        ov.on_mouse_mods(0, WM_LBUTTONDOWN, 200, 180, false, false);
+        ov.on_mouse_mods(0, WM_MOUSEMOVE, 240, 180, false, false);
+        ov.on_mouse_mods(0, WM_LBUTTONUP, 240, 180, false, false);
+        let e = ov.editor.as_ref().unwrap();
+        let top = before.len() - 1;
+        let ok = e.picked == Some(top) && e.doc.shapes()[top] == before[top].translated(crate::raster::Pt::new(40.0, 0.0)) && e.doc.shapes()[..top] == before[..top];
+        check("editor-v2-select-move", ok, "the topmost shape moved by 40,0, the others stayed")?;
+        ov.on_key_mods(0x5A, true, false);
+        check("editor-v2-move-undo", ov.editor.as_ref().unwrap().doc.shapes() == before.as_slice(), "Ctrl+Z puts it back")?;
         ov.on_mouse_mods(0, WM_LBUTTONDOWN, 100, 100, false, true);
         ov.on_mouse_mods(0, WM_MOUSEMOVE, 130, 125, false, true);
         ov.on_mouse_mods(0, WM_LBUTTONUP, 130, 125, false, true);
@@ -1240,6 +1320,14 @@ pub fn run_editor(isolated_clipboard: bool) -> i32 {
             }
             check("editor-isolated-clipboard", true, "real production clipboard helper; DIBV5 and DIB exact edited bytes on private station")?;
         } else { println!("SKIP clipboard: no --isolated-clipboard; user's clipboard never opened"); }
+        // v2: the Frame button on the bar frames the result; the picture sits unchanged in the middle.
+        let (fx, fy) = ov.editor.as_ref().unwrap().item_center(crate::toolbar::Item::Frame).ok_or("no Frame button")?;
+        ov.on_mouse_mods(0, WM_LBUTTONDOWN, fx, fy, false, false);
+        ov.on_mouse_mods(0, WM_LBUTTONUP, fx, fy, false, false);
+        let (frect, framed, prefs) = ov.editor_result().ok_or("no framed bitmap")?;
+        let pad = crate::beautify::FrameLayout::for_size(image.w, image.h, 1.0).pad;
+        let same_middle = framed.get(pad + image.w as i32 / 2, pad + image.h as i32 / 2) == image.get(image.w as i32 / 2, image.h as i32 / 2);
+        check("editor-v2-frame", prefs.frame && framed.w == image.w + 2 * pad as u32 && frect.left == rect.left - pad && same_middle, &format!("{}x{} framed from {}x{}, pad {pad}", framed.w, framed.h, image.w, image.h))?;
         let hwnds = ov.hwnds(); drop(ov);
         check("editor-owned-windows-close", hwnds.iter().all(|h| unsafe { !IsWindow(Some(*h)).as_bool() }) && unsafe { !IsWindow(Some(edit)).as_bool() }, "overlay and native text HWNDs destroyed after image extraction")?;
         Ok(())

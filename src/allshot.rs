@@ -71,5 +71,5 @@ impl ImageSink for CountingClipboard {
 
 /// The text of the short confirmation card: "7040 × 2880 px, 4 screens".
 pub fn describe(shot: &AllShot, lang: crate::i18n::Lang) -> String {
-    format!("{} \u{00D7} {} px, {} {}", shot.w, shot.h, shot.screens, crate::i18n::S::ScreensWord.get(lang))
+    crate::cardview::all_screens_body(shot.w, shot.h, shot.screens, lang)
 }

@@ -11,17 +11,26 @@ use crate::theme::{self, PALETTE, Theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tool {
+    /// Pick a drawn shape, move it, delete it (V).
+    Select,
     Arrow,
     Rect,
+    Ellipse,
     Line,
     Pen,
     Marker,
     Text,
     Steps,
+    Spotlight,
     Obscure,
+    /// Take the colour of a screen pixel (I); then the previous tool comes back.
+    Picker,
 }
 
-pub const TOOLS: [Tool; 8] = [Tool::Arrow, Tool::Rect, Tool::Line, Tool::Pen, Tool::Marker, Tool::Text, Tool::Steps, Tool::Obscure];
+pub const TOOLS: [Tool; 12] = [Tool::Select, Tool::Arrow, Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Pen, Tool::Marker, Tool::Text, Tool::Steps, Tool::Spotlight, Tool::Obscure, Tool::Picker];
+
+/// The drawing tools in toolbar order; the picker sits with the colour, the select tool first.
+pub const DRAW_TOOLS: [Tool; 10] = [Tool::Arrow, Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Pen, Tool::Marker, Tool::Text, Tool::Steps, Tool::Spotlight, Tool::Obscure];
 
 impl Tool {
     pub fn icon(self) -> Icon {
@@ -34,6 +43,10 @@ impl Tool {
             Tool::Text => Icon::Text,
             Tool::Steps => Icon::Steps,
             Tool::Obscure => Icon::Obscure,
+            Tool::Select => Icon::Select,
+            Tool::Ellipse => Icon::Ellipse,
+            Tool::Spotlight => Icon::Spotlight,
+            Tool::Picker => Icon::Picker,
         }
     }
 
@@ -48,6 +61,10 @@ impl Tool {
             Tool::Text => 'T',
             Tool::Steps => 'N',
             Tool::Obscure => 'B',
+            Tool::Select => 'V',
+            Tool::Ellipse => 'E',
+            Tool::Spotlight => 'F',
+            Tool::Picker => 'I',
         }
     }
 
@@ -61,6 +78,10 @@ impl Tool {
             Tool::Text => S::ToolText,
             Tool::Steps => S::ToolSteps,
             Tool::Obscure => S::ToolObscure,
+            Tool::Select => S::ToolSelect,
+            Tool::Ellipse => S::ToolEllipse,
+            Tool::Spotlight => S::ToolSpotlight,
+            Tool::Picker => S::ToolPicker,
         }
     }
 
@@ -76,6 +97,8 @@ pub enum Item {
     /// Replaces Color while the pixelate tool is active: pixelate or blur.
     ObscureMode,
     Size,
+    /// Put the finished picture on a framed ground (a toggle).
+    Frame,
     Undo,
     Redo,
     Pin,
@@ -100,6 +123,7 @@ impl Item {
             Item::Color => s(S::Color),
             Item::ObscureMode => s(if obscure == ObscureMode::Pixelate { S::ToolObscure } else { S::ToolBlur }),
             Item::Size => format!("{} (1, 2, 3)", S::Size.get(lang)),
+            Item::Frame => s(S::FrameTip),
             Item::Undo => format!("{} (Ctrl+Z)", S::Undo.get(lang)),
             Item::Redo => format!("{} (Ctrl+Y)", S::Redo.get(lang)),
             Item::Pin => format!("{} (Ctrl+P)", S::Pin.get(lang)),
@@ -127,12 +151,15 @@ pub fn editor_slots(tool: Option<Tool>) -> Vec<Slot> {
 
 /// `text_action`: text capture is on, so the bar offers "copy text" beside "copy".
 pub fn editor_slots_with(tool: Option<Tool>, text_action: bool) -> Vec<Slot> {
-    let mut v: Vec<Slot> = TOOLS.iter().map(|&t| Slot::Btn(Item::Tool(t))).collect();
+    // Groups: pick | draw | colour and size | history | out.
+    let mut v: Vec<Slot> = vec![Slot::Btn(Item::Tool(Tool::Select)), Slot::Sep];
+    v.extend(DRAW_TOOLS.iter().map(|&t| Slot::Btn(Item::Tool(t))));
     v.push(Slot::Sep);
+    v.push(Slot::Btn(Item::Tool(Tool::Picker)));
     v.push(Slot::Btn(if tool == Some(Tool::Obscure) { Item::ObscureMode } else { Item::Color }));
     v.push(Slot::Btn(Item::Size));
     v.push(Slot::Sep);
-    v.extend([Slot::Btn(Item::Undo), Slot::Btn(Item::Redo), Slot::Sep, Slot::Btn(Item::Pin), Slot::Btn(Item::Save)]);
+    v.extend([Slot::Btn(Item::Undo), Slot::Btn(Item::Redo), Slot::Sep, Slot::Btn(Item::Frame), Slot::Btn(Item::Pin), Slot::Btn(Item::Save)]);
     if text_action {
         v.push(Slot::Btn(Item::CopyText));
     }
@@ -189,6 +216,63 @@ impl Bar {
         Bar { w: x + pad, h: btn + 2 * pad, scale, buttons, seps }
     }
 
+    /// Like `layout`, but no wider than `max_w`: a bar that does not fit (a small monitor at a high
+    /// scale) breaks into rows between its groups, as few rows as fit, the widest row as narrow
+    /// as it can be. Only a single group wider than `max_w` is broken inside.
+    pub fn layout_fit(slots: &[Slot], t: &Theme, scale: f32, max_w: i32) -> Bar {
+        let one = Bar::layout(slots, t, scale);
+        if one.w <= max_w {
+            return one;
+        }
+        let groups: Vec<Vec<Slot>> = slots.split(|s| *s == Slot::Sep).filter(|g| !g.is_empty()).map(|g| g.to_vec()).collect();
+        let width = |gs: &[Vec<Slot>]| Bar::layout(&join_groups(gs), t, scale).w;
+        // Few groups (six on the editor bar): try every way to cut them into 2, 3, ... rows.
+        for rows in 2..=groups.len() {
+            let mut best: Option<(i32, Vec<usize>)> = None;
+            for cuts in cut_points(groups.len(), rows) {
+                let widest = row_ranges(&cuts, groups.len()).map(|(a, b)| width(&groups[a..b])).max().unwrap_or(0);
+                if widest <= max_w && best.as_ref().is_none_or(|(w, _)| widest < *w) {
+                    best = Some((widest, cuts));
+                }
+            }
+            if let Some((_, cuts)) = best {
+                let rows: Vec<Vec<Slot>> = row_ranges(&cuts, groups.len()).map(|(a, b)| join_groups(&groups[a..b])).collect();
+                return Bar::stack(&rows, t, scale);
+            }
+        }
+        // Even one group per row is too wide: fill rows button by button.
+        let mut rows: Vec<Vec<Slot>> = Vec::new();
+        for g in &groups {
+            let mut row: Vec<Slot> = Vec::new();
+            for s in g {
+                row.push(*s);
+                if row.len() > 1 && Bar::layout(&row, t, scale).w > max_w {
+                    let last = row.pop().unwrap_or(*s);
+                    rows.push(std::mem::replace(&mut row, vec![last]));
+                }
+            }
+            rows.push(row);
+        }
+        Bar::stack(&rows, t, scale)
+    }
+
+    /// Rows laid out one under the other, each centred in the widest.
+    fn stack(rows: &[Vec<Slot>], t: &Theme, scale: f32) -> Bar {
+        let laid: Vec<Bar> = rows.iter().map(|r| Bar::layout(r, t, scale)).collect();
+        let pad = (t.pad * scale).round() as i32;
+        let gap = (t.gap * scale).round() as i32;
+        let w = laid.iter().map(|b| b.w).max().unwrap_or(2 * pad);
+        let row_h = laid.first().map(|b| b.h - 2 * pad).unwrap_or(0);
+        let mut bar = Bar { w, h: 2 * pad, scale, buttons: Vec::new(), seps: Vec::new() };
+        for (i, r) in laid.iter().enumerate() {
+            let (dx, dy) = ((w - r.w) / 2, i as i32 * (row_h + gap));
+            bar.buttons.extend(r.buttons.iter().map(|(it, b)| (*it, b.translate(dx, dy))));
+            bar.seps.extend(r.seps.iter().map(|b| b.translate(dx, dy)));
+        }
+        bar.h += laid.len() as i32 * row_h + (laid.len() as i32 - 1).max(0) * gap;
+        bar
+    }
+
     pub fn hit(&self, x: i32, y: i32) -> Option<Item> {
         self.buttons.iter().find(|(_, b)| b.contains(x, y)).map(|(i, _)| *i)
     }
@@ -196,6 +280,44 @@ impl Bar {
     pub fn button(&self, item: Item) -> Option<IBox> {
         self.buttons.iter().find(|(i, _)| *i == item).map(|(_, b)| *b)
     }
+}
+
+fn join_groups(gs: &[Vec<Slot>]) -> Vec<Slot> {
+    let mut v = Vec::new();
+    for (i, g) in gs.iter().enumerate() {
+        if i > 0 {
+            v.push(Slot::Sep);
+        }
+        v.extend_from_slice(g);
+    }
+    v
+}
+
+/// Every way to cut `n` groups into `rows` non-empty rows, as the sorted start indices of rows
+/// 2..: `[2, 4]` means rows `0..2`, `2..4` and `4..n`.
+fn cut_points(n: usize, rows: usize) -> Vec<Vec<usize>> {
+    fn go(from: usize, n: usize, left: usize, cur: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        if left == 0 {
+            out.push(cur.clone());
+            return;
+        }
+        for c in from..=n - left {
+            cur.push(c);
+            go(c + 1, n, left - 1, cur, out);
+            cur.pop();
+        }
+    }
+    let mut out = Vec::new();
+    if rows >= 1 && rows <= n {
+        go(1, n, rows - 1, &mut Vec::new(), &mut out);
+    }
+    out
+}
+
+fn row_ranges(cuts: &[usize], n: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let starts = std::iter::once(0).chain(cuts.iter().copied());
+    let ends = cuts.iter().copied().chain(std::iter::once(n));
+    starts.zip(ends)
 }
 
 /// What the bar shows besides its layout.
@@ -344,6 +466,7 @@ pub fn item_icon(item: Item) -> Icon {
         Item::Color => Icon::Color,
         Item::ObscureMode => Icon::Obscure,
         Item::Size => Icon::Size,
+        Item::Frame => Icon::Frame,
         Item::Undo => Icon::Undo,
         Item::Redo => Icon::Redo,
         Item::Pin => Icon::Pin,
@@ -534,31 +657,106 @@ pub fn render_tooltip(text: &str, t: &Theme, scale: f32, g: &dyn Glyphs) -> Canv
 
 /// The hint of the text overlay: what to do, then Esc as a key cap and what it does.
 pub fn render_text_hint(what: &str, keys: &[(&str, &str)], t: &Theme, scale: f32, g: &dyn Glyphs) -> Canvas {
+    render_hint(what, keys, t, scale, g, i32::MAX)
+}
+
+/// The plain snip's hint under the mode bar: the sentence, then its keys as caps.
+pub fn render_plain_hint(lang: Lang, t: &Theme, scale: f32, g: &dyn Glyphs, max_w: i32) -> Canvas {
+    let keys = [
+        ("Enter", S::PlainKeyFull.get(lang)),
+        ("Shift+Enter", S::PlainKeyWork.get(lang)),
+        (S::PlainKeyShiftClick.get(lang), S::PlainKeyAdd.get(lang)),
+        ("Backspace", S::PlainKeyRemove.get(lang)),
+        ("Alt", S::PlainKeyParts.get(lang)),
+        ("Esc", S::TextHintCancel.get(lang)),
+    ];
+    // A compact panel under the mode bar, not a strip across the screen.
+    let max_w = max_w.min((theme::HINT_MAX_W * scale).round() as i32);
+    render_hint(S::PlainHint.get(lang), &keys, t, scale, g, max_w)
+}
+
+/// The hint while picking the area to record.
+pub fn render_record_hint(lang: Lang, t: &Theme, scale: f32, g: &dyn Glyphs) -> Canvas {
+    render_text_hint(S::RecordHint.get(lang), &[("Enter", S::PlainKeyFull.get(lang)), ("Esc", S::TextHintCancel.get(lang))], t, scale, g)
+}
+
+/// A hint panel: what to do, then each key as a small cap with its meaning after it
+/// ("Alt  başka ekrana geçer   Esc  iptal"). One row when it fits in `max_w` pixels; otherwise
+/// the sentence on its own row and the keys wrapped under it, left-aligned.
+pub fn render_hint(what: &str, keys: &[(&str, &str)], t: &Theme, scale: f32, g: &dyn Glyphs, max_w: i32) -> Canvas {
     let s = |d: f32| (d * scale).round() as i32;
     let font = t.font * scale;
     let a = g.text(what, font, true);
-    // Each key is a small cap with its meaning after it: "Alt  başka ekrana geçer   Esc  iptal".
     let parts: Vec<_> = keys.iter().map(|(k, label)| (g.text(k, t.font_small * scale, true), g.text(label, font, false))).collect();
-    let (pad_x, pad_y, gap, cap_pad) = (s(16.0), s(10.0), s(14.0), s(7.0));
+    let (pad_x, pad_y, gap, cap_pad, after) = (s(16.0), s(10.0), s(14.0), s(7.0), s(6.0));
     let cap_h = parts.iter().map(|(k, _)| k.h as i32).max().unwrap_or(0) + s(4.0);
-    let h = (a.h as i32).max(cap_h) + 2 * pad_y;
-    let w = pad_x * 2 + a.w as i32 + parts.iter().map(|(k, l)| gap + k.w as i32 + 2 * cap_pad + s(6.0) + l.w as i32).sum::<i32>();
+    let row_h = (a.h as i32).max(cap_h);
+    let part_w = |k: &crate::raster::TextMask, l: &crate::raster::TextMask| k.w as i32 + 2 * cap_pad + after + l.w as i32;
+    let one_row = pad_x * 2 + a.w as i32 + parts.iter().map(|(k, l)| gap + part_w(k, l)).sum::<i32>();
+    // Rows of (x, part index) after the sentence; the first row may share the sentence's line.
+    let mut rows: Vec<Vec<(i32, usize)>> = Vec::new();
+    let w = if one_row <= max_w || parts.is_empty() {
+        let mut x = pad_x + a.w as i32;
+        rows.push(parts.iter().enumerate().map(|(i, (k, l))| { let at = x + gap; x = at + part_w(k, l); (at, i) }).collect());
+        one_row
+    } else {
+        // Greedy rows at the widest allowed, then the narrowest width that still needs no more
+        // rows, so the rows come out even instead of one long row and a lone key.
+        let widths: Vec<i32> = parts.iter().map(|(k, l)| part_w(k, l)).collect();
+        let pack = |limit: i32| -> Vec<Vec<usize>> {
+            let mut out: Vec<Vec<usize>> = Vec::new();
+            let mut x = 0;
+            for (i, &pw) in widths.iter().enumerate() {
+                if out.is_empty() || (x > 0 && x + gap + pw > limit) {
+                    out.push(Vec::new());
+                    x = 0;
+                }
+                x = if x == 0 { pw } else { x + gap + pw };
+                out.last_mut().unwrap().push(i);
+            }
+            out
+        };
+        let inner = (max_w - 2 * pad_x).max(1);
+        let n = pack(inner).len();
+        let mut limit = widths.iter().copied().max().unwrap_or(0).max(widths.iter().sum::<i32>() / n as i32);
+        while pack(limit).len() > n && limit < inner {
+            limit += s(4.0).max(1);
+        }
+        rows.push(Vec::new());
+        let mut widest = a.w as i32;
+        for row in pack(limit.min(inner)) {
+            let mut x = 0;
+            let mut placed = Vec::new();
+            for i in row {
+                let at = if x == 0 { 0 } else { x + gap };
+                placed.push((pad_x + at, i));
+                x = at + widths[i];
+            }
+            widest = widest.max(x);
+            rows.push(placed);
+        }
+        widest + 2 * pad_x
+    };
+    let row_gap = s(6.0);
+    let h = rows.len() as i32 * row_h + (rows.len() as i32 - 1) * row_gap + 2 * pad_y;
     let mut cv = Canvas::new(w as u32, h as u32, Rgba::rgb(0, 0, 0).with_alpha(0));
     panel(&mut cv, t, scale);
-    let mid = h / 2;
-    cv.text_mask(&a, pad_x, mid - a.h as i32 / 2, t.text);
-    let mut x = pad_x + a.w as i32;
-    for (k, label) in &parts {
-        let cap = IBox::new(x + gap, mid - cap_h / 2, x + gap + k.w as i32 + 2 * cap_pad, mid + cap_h - cap_h / 2);
-        let mut m = Mask::new(cap);
-        m.rounded_box(cap.x0 as f32, cap.y0 as f32, cap.x1 as f32, cap.y1 as f32, t.control_radius() * scale);
-        cv.blend_mask(&m, t.raised);
-        let mut o = Mask::new(cap);
-        o.rounded_box_outline(cap.x0 as f32, cap.y0 as f32, cap.x1 as f32, cap.y1 as f32, t.control_radius() * scale, (theme::BORDER_WIDTH * scale).max(1.0));
-        cv.blend_mask(&o, t.border);
-        cv.text_mask(k, cap.x0 + cap_pad, cap.y0 + (cap.h() - k.h as i32) / 2, t.on_raised);
-        cv.text_mask(label, cap.x1 + s(6.0), mid - label.h as i32 / 2, t.muted);
-        x = cap.x1 + s(6.0) + label.w as i32;
+    let mid0 = pad_y + row_h / 2;
+    cv.text_mask(&a, pad_x, mid0 - a.h as i32 / 2, t.text);
+    for (r, row) in rows.iter().enumerate() {
+        let mid = mid0 + r as i32 * (row_h + row_gap);
+        for &(x, i) in row {
+            let (k, label) = &parts[i];
+            let cap = IBox::new(x, mid - cap_h / 2, x + k.w as i32 + 2 * cap_pad, mid + cap_h - cap_h / 2);
+            let mut m = Mask::new(cap);
+            m.rounded_box(cap.x0 as f32, cap.y0 as f32, cap.x1 as f32, cap.y1 as f32, t.control_radius() * scale);
+            cv.blend_mask(&m, t.raised);
+            let mut o = Mask::new(cap);
+            o.rounded_box_outline(cap.x0 as f32, cap.y0 as f32, cap.x1 as f32, cap.y1 as f32, t.control_radius() * scale, (theme::BORDER_WIDTH * scale).max(1.0));
+            cv.blend_mask(&o, t.border);
+            cv.text_mask(k, cap.x0 + cap_pad, cap.y0 + (cap.h() - k.h as i32) / 2, t.on_raised);
+            cv.text_mask(label, cap.x1 + after, mid - label.h as i32 / 2, t.muted);
+        }
     }
     cv
 }
@@ -620,16 +818,20 @@ mod tests {
     #[test]
     fn editor_bar_has_every_tool_and_action_once() {
         let b = Bar::layout(&editor_slots(None), &theme(), 1.0);
-        assert_eq!(b.buttons.len(), 16);
+        assert_eq!(b.buttons.len(), 21);
         for t in TOOLS {
-            assert!(b.button(Item::Tool(t)).is_some(), "{t:?}");
+            assert_eq!(b.buttons.iter().filter(|(i, _)| *i == Item::Tool(t)).count(), 1, "{t:?}");
         }
-        for it in [Item::Color, Item::Size, Item::Undo, Item::Redo, Item::Pin, Item::Save, Item::Copy, Item::Close] {
+        for it in [Item::Color, Item::Size, Item::Frame, Item::Undo, Item::Redo, Item::Pin, Item::Save, Item::Copy, Item::Close] {
             assert_eq!(b.buttons.iter().filter(|(i, _)| *i == it).count(), 1, "{it:?}");
         }
-        assert_eq!(b.seps.len(), 4);
-        // 16 buttons of 32, 4 separators of 9, 19 gaps of 2, 4 padding each side.
-        assert_eq!((b.w, b.h), (16 * 32 + 4 * 9 + 19 * 2 + 8, 40));
+        assert_eq!(b.seps.len(), 5);
+        // 21 buttons of 32, 5 separators of 9, 25 gaps of 2, 4 padding each side.
+        assert_eq!((b.w, b.h), (21 * 32 + 5 * 9 + 25 * 2 + 8, 40));
+        // The select tool leads; the picker sits right before the colour.
+        assert_eq!(b.buttons[0].0, Item::Tool(Tool::Select));
+        let at = |it: Item| b.buttons.iter().position(|(i, _)| *i == it).unwrap();
+        assert_eq!(at(Item::Tool(Tool::Picker)) + 1, at(Item::Color));
     }
 
     #[test]
@@ -654,6 +856,36 @@ mod tests {
         for s in &b.seps {
             assert_eq!(b.hit(s.x0, s.y0), None, "separator");
         }
+    }
+
+    #[test]
+    fn a_bar_too_wide_breaks_between_groups_and_keeps_every_button() {
+        let t = theme();
+        let slots = editor_slots_with(None, true);
+        let one = Bar::layout(&slots, &t, 2.5);
+        assert_eq!(Bar::layout_fit(&slots, &t, 2.5, one.w), one, "fits: unchanged");
+        for max_w in [one.w - 1, 1900, 1200, 700, 300] {
+            let b = Bar::layout_fit(&slots, &t, 2.5, max_w);
+            let widest_btn = (t.button * 2.5).round() as i32 + 2 * (t.pad * 2.5).round() as i32;
+            assert!(b.w <= max_w.max(widest_btn), "{max_w}: {}", b.w);
+            assert_eq!(b.buttons.len(), one.buttons.len());
+            for (it, _) in &one.buttons {
+                assert_eq!(b.buttons.iter().filter(|(i, _)| i == it).count(), 1, "{it:?}");
+            }
+            for (i, (_, a)) in b.buttons.iter().enumerate() {
+                assert!(a.x0 >= 0 && a.y0 >= 0 && a.x1 <= b.w && a.y1 <= b.h);
+                assert_eq!(b.hit(a.x0 + 1, a.y0 + 1), Some(b.buttons[i].0));
+                for (_, c) in &b.buttons[i + 1..] {
+                    assert!(a.intersect(c).is_empty());
+                }
+            }
+        }
+        // 1920 px at 250 %: two rows, cut where a group ends.
+        let b = Bar::layout_fit(&slots, &t, 2.5, 1920 - 2 * 20);
+        let rows: std::collections::BTreeSet<i32> = b.buttons.iter().map(|(_, x)| x.y0).collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(cut_points(4, 2), vec![vec![1], vec![2], vec![3]]);
+        assert_eq!(cut_points(4, 3), vec![vec![1, 2], vec![1, 3], vec![2, 3]]);
     }
 
     #[test]
@@ -747,17 +979,25 @@ mod tests {
     }
 
     #[test]
-    fn plain_hint_is_one_line_in_both_languages() {
+    fn plain_hint_wraps_its_keys_into_even_rows_under_the_sentence() {
         let t = theme();
+        let keys = [("Enter", "full screen"), ("Esc", "cancel")];
+        let one = render_hint("Drag", &keys, &t, 1.0, &BoxFont, i32::MAX);
+        assert_eq!(one.h, render_text_hint("Drag", &keys, &t, 1.0, &BoxFont).h, "one row when there is room");
         for lang in [Lang::Tr, Lang::En] {
-            let text = S::PlainHint.get(lang);
-            assert!(!text.contains('\n'));
-            let cv = render_text_hint(text, &[], &t, 1.0, &BoxFont);
-            let short = render_text_hint("Enter", &[], &t, 1.0, &BoxFont);
-            assert_eq!(cv.h, short.h);
-            assert!(cv.w > short.w && cv.px.iter().any(|b| *b != 0));
-            for key in ["Enter", "Shift+Enter", "Backspace", "Esc"] { assert!(text.contains(key)); }
+            for (scale, screen) in [(1.0, 1920), (1.0, 700), (1.5, 1560)] {
+                let cv = render_plain_hint(lang, &t, scale, &BoxFont, screen - 32);
+                assert!(cv.w as i32 <= ((theme::HINT_MAX_W * scale) as i32).min(screen - 32), "{lang:?} {scale} {screen}: {}", cv.w);
+                assert!(cv.h > one.h * 2, "the sentence, then the keys");
+                assert!(cv.px.iter().any(|b| *b != 0));
+            }
         }
+        // Even rows: no row of the keys is much shorter than the others because of one lone key.
+        let what = "Drag an area or click a window";
+        let six = [("Enter", "full screen"), ("Shift+Enter", "without the taskbar"), ("Shift+click", "add one more"), ("Backspace", "remove the last"), ("Alt", "inner parts"), ("Esc", "cancel")];
+        let wide = render_hint(what, &six, &t, 1.0, &BoxFont, 760);
+        let tight = render_hint(what, &six, &t, 1.0, &BoxFont, 1060);
+        assert!(tight.w < 1060 && wide.w <= 760);
     }
 
     #[test]
@@ -799,5 +1039,9 @@ mod tests {
     fn tooltips_name_their_shortcut() {
         assert_eq!(Item::Tool(Tool::Arrow).tooltip(Lang::En, ObscureMode::Pixelate), "Arrow (A)");
         assert_eq!(Item::Copy.tooltip(Lang::Tr, ObscureMode::Pixelate), "Kopyala (Ctrl+C)");
+        assert_eq!(Item::Tool(Tool::Ellipse).tooltip(Lang::En, ObscureMode::Pixelate), "Ellipse (E)");
+        assert_eq!(Item::Tool(Tool::Spotlight).tooltip(Lang::Tr, ObscureMode::Pixelate), "Spot ışığı (F)");
+        assert_eq!(Item::Tool(Tool::Select).tooltip(Lang::En, ObscureMode::Pixelate), "Select and move (V)");
+        assert_eq!(Item::Tool(Tool::Picker).tooltip(Lang::En, ObscureMode::Pixelate), "Pick a colour (I)");
     }
 }

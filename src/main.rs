@@ -16,6 +16,7 @@
 //!   snip probe [options]      P0 measurements into a log (see src/probe.rs)
 //!       --out <dir>  --runs <n>  --wgc  --live  --save-images  --hook-seconds <n>
 //!   snip --no-hook --no-tray --exit-after <s>   idle test: no hook, no tray, exits and logs memory
+//!   snip --demo-gif DIR [--scene FILE]  the README films and stills, drawn by the app's own renderer from scripts (no window)
 //!   snip --selftest-editor [--isolated-clipboard]  hidden synthetic editor acceptance; clipboard requires private SnipNightTest* station
 //!   snip --selftest-perf [ultra|ultra-1khz|small|four|four-1khz]
 //!                             frame times and memory on a synthetic monitor (hidden desktop only);
@@ -130,6 +131,58 @@ fn dispatch(args: &[String]) -> i32 {
         "--selftest" | "selftest" => {
             attach_console();
             snip::selftest::run()
+        }
+        "--demo-gif" => {
+            // The README films: no window, no screen, no input; see src/demo.rs.
+            attach_console();
+            let Some(dir) = args.get(1).filter(|d| !d.starts_with("--")) else {
+                println!("usage: snip --demo-gif DIR [--scene FILE]");
+                return 2;
+            };
+            // The PNG encoder is WIC, a COM component.
+            unsafe {
+                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+            }
+            let g = snip::gdi::GdiGlyphs::new();
+            // `--scene FILE`: also write the made-up desktop for `--selftest-look` (u32 w, u32 h, BGRA).
+            if let Some(file) = args.iter().skip(2).position(|a| a == "--scene").and_then(|i| args.get(i + 3)) {
+                if let Some(parent) = std::path::Path::new(file).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let s = snip::demo::scene(&g, 1.0, &snip::demo::Desk::default());
+                let mut raw = Vec::with_capacity(8 + s.px.len());
+                raw.extend_from_slice(&s.w.to_le_bytes());
+                raw.extend_from_slice(&s.h.to_le_bytes());
+                raw.extend_from_slice(&s.px);
+                if let Err(e) = std::fs::write(file, raw) {
+                    println!("FAIL scene: {e}");
+                    return 1;
+                }
+            }
+            // The text film's words come from the Windows OCR, as a text capture reads them.
+            let ocr = |c: &snip::raster::Canvas| snip::ocr::read(c.w, c.h, &c.px, "auto").map(|r| r.text).map_err(|e| format!("{e:?}"));
+            match snip::demo::write_all(std::path::Path::new(dir), &g, &ocr) {
+                Ok((lines, stills)) => {
+                    for l in lines {
+                        println!("{l}");
+                    }
+                    for (name, still) in stills {
+                        let path = std::path::Path::new(dir).join(format!("{name}.png"));
+                        match snip::png::encode_png(still.w, still.h, &still.px).map_err(|e| e.to_string()).and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
+                            Ok(()) => println!("{name}.png: {}x{}", still.w, still.h),
+                            Err(e) => {
+                                println!("FAIL still {name}: {e}");
+                                return 1;
+                            }
+                        }
+                    }
+                    0
+                }
+                Err(e) => {
+                    println!("FAIL {e}");
+                    1
+                }
+            }
         }
         "--selftest-editor" => {
             attach_console();

@@ -113,6 +113,9 @@ impl IBox {
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.x0 && x < self.x1 && y >= self.y0 && y < self.y1
     }
+    pub fn translate(&self, dx: i32, dy: i32) -> IBox {
+        IBox::new(self.x0 + dx, self.y0 + dy, self.x1 + dx, self.y1 + dy)
+    }
     pub fn intersect(&self, o: &IBox) -> IBox {
         let r = IBox::new(self.x0.max(o.x0), self.y0.max(o.y0), self.x1.min(o.x1), self.y1.min(o.y1));
         if r.x0 < r.x1 && r.y0 < r.y1 { r } else { IBox::default() }
@@ -550,6 +553,12 @@ impl Mask {
         });
     }
 
+    /// The outline of the ellipse with centre `c` and radii `r` (to the middle of the stroke).
+    pub fn ellipse_outline(&mut self, c: Pt, r: Pt, width: f32) {
+        let area = IBox::around(c.x - r.x, c.y - r.y, c.x + r.x, c.y + r.y, width / 2.0 + 1.0);
+        self.shape(area, |p| sd_ellipse(p.minus(c), r).abs() - width / 2.0);
+    }
+
     /// A filled box with rounded corners of radius `r`.
     pub fn rounded_box(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) {
         let (c, half) = box_center_half(x0, y0, x1, y1);
@@ -579,6 +588,18 @@ pub fn sd_box(p: Pt, half: Pt) -> f32 {
     let q = Pt::new(p.x.abs() - half.x, p.y.abs() - half.y);
     let outside = Pt::new(q.x.max(0.0), q.y.max(0.0)).len();
     outside + q.x.max(q.y).min(0.0)
+}
+
+/// Signed distance to an axis-aligned ellipse centred at the origin with radii `r`: the implicit
+/// function divided by its gradient, which is exact on the curve and close to it within a stroke
+/// width. A flat ellipse (a radius under half a pixel) is a line.
+pub fn sd_ellipse(p: Pt, r: Pt) -> f32 {
+    let (rx, ry) = (r.x.max(0.5), r.y.max(0.5));
+    let f = (p.x * p.x) / (rx * rx) + (p.y * p.y) / (ry * ry) - 1.0;
+    let gx = 2.0 * p.x / (rx * rx);
+    let gy = 2.0 * p.y / (ry * ry);
+    let g = (gx * gx + gy * gy).sqrt();
+    if g < 1e-6 { -rx.min(ry) } else { f / g }
 }
 
 /// Chebyshev distance to a box: the outside corners stay square.
@@ -668,6 +689,21 @@ mod tests {
 
     const WHITE: Rgba = Rgba::rgb(255, 255, 255);
     const RED: Rgba = Rgba::rgb(255, 0, 0);
+
+    #[test]
+    fn ellipse_distance_is_exact_on_a_circle_and_zero_on_the_curve() {
+        let r = Pt::new(20.0, 20.0);
+        for p in [Pt::new(25.0, 0.0), Pt::new(0.0, 18.0), Pt::new(-14.0, 14.0)] {
+            assert!((sd_ellipse(p, r) - (p.len() - 20.0)).abs() < 0.6, "{p:?}");
+        }
+        let e = Pt::new(40.0, 10.0);
+        for k in 0..12 {
+            let a = k as f32 * 0.5;
+            let on = Pt::new(e.x * a.cos(), e.y * a.sin());
+            assert!(sd_ellipse(on, e).abs() < 1e-3, "{on:?}");
+        }
+        assert!(sd_ellipse(Pt::new(0.0, 0.0), e) < 0.0, "the centre is inside");
+    }
 
     #[test]
     fn hex_round_trip_and_errors() {

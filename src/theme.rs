@@ -298,12 +298,34 @@ pub const ARROW_HEAD_MIN: f32 = 10.0;
 pub const ARROW_HEAD_HALF_SCALE: f32 = 0.55;
 pub const ARROW_SHAFT_END_SCALE: f32 = 0.6;
 pub const PLAIN_DIM_DEFAULT: f32 = 0.45;
+/// The spotlight: how dark the rest of the picture goes (alpha of black) and the lit box's corners.
+pub const SPOTLIGHT_DIM: u8 = 150;
+pub const SPOTLIGHT_RADIUS: f32 = 6.0;
+/// The magnifier: pixels across (odd, so one sits in the middle), their size, the readout below.
+pub const LOUPE_PIXELS: u32 = 15;
+pub const LOUPE_ZOOM: f32 = 10.0;
+pub const LOUPE_READOUT: f32 = 24.0;
+pub const LOUPE_OFFSET: f32 = 24.0;
+/// The picture frame (the editor's Frame button): padding as a share of the shorter side, within
+/// these limits, the picture's corner radius, and its shadow.
+pub const FRAME_PAD_SHARE: f32 = 0.07;
+pub const FRAME_PAD_MIN: f32 = 28.0;
+pub const FRAME_PAD_MAX: f32 = 96.0;
+pub const FRAME_RADIUS: f32 = 10.0;
+pub const FRAME_SHADOW_BLUR: f32 = 22.0;
+pub const FRAME_SHADOW_Y: f32 = 8.0;
+pub const FRAME_SHADOW_ALPHA: u8 = 90;
+/// The frame's ground: a quiet two-stop vertical wash, slate to a cooler slate. No hue jumps.
+pub const FRAME_TOP: Rgba = c(0x3B4552);
+pub const FRAME_BOTTOM: Rgba = c(0x262C35);
 pub const WINDOW_WORK_MARGIN: f32 = 24.0;
 pub const HISTORY_THUMB_PIXELS: (u32, u32) = (200, 125);
 pub const PIN_OPACITY: [u8; 4] = [255, 217, 166, 115];
 pub const PIN_OPACITY_PERCENT: [u32; 4] = [100, 85, 65, 45];
 
 pub const MODE_BAR_TOP: f32 = 16.0;
+/// The widest the plain snip's hint grows before its keys wrap into rows.
+pub const HINT_MAX_W: f32 = 760.0;
 pub const SELECTION_LABEL_GAP: f32 = 6.0;
 pub const EDITOR_BAR_GAP: f32 = 8.0;
 pub const PALETTE_BAR_GAP: f32 = 6.0;

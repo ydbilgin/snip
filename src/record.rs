@@ -91,7 +91,8 @@ pub fn selection(rect: Rect, anchor: Point, monitors: &[Rect]) -> Option<Rect> {
     (r.width() >= 2 && r.height() >= 2).then_some(r)
 }
 /// All bars and the optional control are outside the captured pixels, clipped to the monitor.
-pub fn indicator(rect: Rect, monitor: Rect) -> (Vec<Rect>, Option<Rect>) {
+/// `control`: the control's size in pixels (`render_control`); `gap`: its distance from the area.
+pub fn indicator(rect: Rect, monitor: Rect, control: (i32, i32), gap: i32) -> (Vec<Rect>, Option<Rect>) {
     let bars = [
         Rect::new(rect.left - 2, rect.top - 2, rect.right + 2, rect.top),
         Rect::new(rect.left - 2, rect.bottom, rect.right + 2, rect.bottom + 2),
@@ -101,13 +102,55 @@ pub fn indicator(rect: Rect, monitor: Rect) -> (Vec<Rect>, Option<Rect>) {
     .iter()
     .filter_map(|r| r.intersect(&monitor))
     .collect();
+    let (w, h) = control;
     let panel = [
-        Rect::from_xywh(rect.left, rect.top - 32, 180, 30),
-        Rect::from_xywh(rect.left, rect.bottom + 2, 180, 30),
+        Rect::from_xywh(rect.left, rect.top - 2 - gap - h, w, h),
+        Rect::from_xywh(rect.left, rect.bottom + 2 + gap, w, h),
     ]
     .into_iter()
     .find(|p| p.intersect(&monitor) == Some(*p) && p.intersect(&rect).is_none());
     (bars, panel)
+}
+
+/// The recording control beside the area, in the app's panel style: a red dot, the time, a rule,
+/// then a stop square and its word. The width is that of "00:00", so it does not move as the time
+/// counts. Square corners: the control is a plain window that cannot be see-through.
+pub fn render_control(elapsed_ms: u64, stop: &str, t: &crate::theme::Theme, scale: f32, g: &dyn crate::raster::Glyphs) -> crate::raster::Canvas {
+    use crate::raster::{Canvas, IBox, Mask, Pt};
+    let s = |d: f32| (d * scale).round() as i32;
+    let font = t.font * scale;
+    let time = format!("{:02}:{:02}", elapsed_ms / 60_000, elapsed_ms / 1000 % 60);
+    let tm = g.text(&time, font, true);
+    let tw = g.text("00:00", font, true).w.max(tm.w) as i32;
+    let sm = g.text(stop, font, false);
+    let (pad, dot, gap, square) = (s(12.0), s(8.0), s(8.0), s(9.0));
+    let h = s(theme_bar_height(t));
+    let w = pad + dot + gap + tw + s(12.0) + 1.max(s(1.0)) + s(12.0) + square + gap + sm.w as i32 + pad;
+    let mut cv = Canvas::new(w as u32, h as u32, t.bg);
+    let bw = 1.max(s(crate::theme::BORDER_WIDTH));
+    for b in [IBox::new(0, 0, w, bw), IBox::new(0, h - bw, w, h), IBox::new(0, 0, bw, h), IBox::new(w - bw, 0, w, h)] {
+        cv.fill_box(b, t.border);
+    }
+    let mid = h / 2;
+    let mut m = Mask::new(cv.bounds());
+    m.disc(Pt::new((pad + dot / 2) as f32, mid as f32), dot as f32 / 2.0);
+    cv.blend_mask(&m, t.danger);
+    let mut x = pad + dot + gap;
+    cv.text_mask(&tm, x, mid - tm.h as i32 / 2, t.text);
+    x += tw + s(12.0);
+    cv.fill_box(IBox::new(x, mid - s(8.0), x + 1.max(s(1.0)), mid + s(8.0)), t.border);
+    x += 1.max(s(1.0)) + s(12.0);
+    let mut q = Mask::new(cv.bounds());
+    q.rounded_box(x as f32, (mid - square / 2) as f32, (x + square) as f32, (mid - square / 2 + square) as f32, s(1.5) as f32);
+    cv.blend_mask(&q, t.text);
+    x += square + gap;
+    cv.text_mask(&sm, x, mid - sm.h as i32 / 2, t.text);
+    cv
+}
+
+/// The control is as tall as a toolbar of the look (button and padding).
+fn theme_bar_height(t: &crate::theme::Theme) -> f32 {
+    t.button + 2.0 * t.pad
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -572,11 +615,36 @@ mod tests {
         );
         for m in monitors {
             for r in [m, Rect::from_xywh(m.left + 50, m.top + 50, 641, 359)] {
-                let (bars, p) = indicator(r, m);
+                let (bars, p) = indicator(r, m, (150, 40), 6);
                 for b in bars.into_iter().chain(p) {
                     assert!(b.intersect(&r).is_none());
                     assert_eq!(b.intersect(&m), Some(b));
                 }
+            }
+        }
+    }
+    #[test]
+    fn the_control_keeps_its_width_scales_and_shows_its_parts() {
+        use crate::raster::BoxFont;
+        use crate::theme::{Look, Mode, Theme};
+        let t = Theme::new(Look::Graphite, Mode::Dark);
+        let a = render_control(0, "Stop", &t, 1.0, &BoxFont);
+        let b = render_control(754_000, "Stop", &t, 1.0, &BoxFont);
+        assert_eq!((a.w, a.h), (b.w, b.h), "the time counting does not move the control");
+        assert_eq!(a.h as f32, t.button + 2.0 * t.pad, "as tall as a toolbar");
+        let big = render_control(0, "Stop", &t, 1.5, &BoxFont);
+        assert_eq!(big.h, (a.h as f32 * 1.5).round() as u32);
+        // The border all round, the red dot at the left, the panel colour inside.
+        assert_eq!(a.get(0, 0), t.border);
+        assert_eq!(a.get(a.w as i32 - 1, a.h as i32 - 1), t.border);
+        assert_eq!(a.get(12 + 4, a.h as i32 / 2), t.danger);
+        assert_eq!(a.get(a.w as i32 - 4, 4), t.bg);
+        // Placed beside the area, never on it, for every size it can have.
+        let m = Rect::from_xywh(0, 0, 1920, 1080);
+        for r in [Rect::from_xywh(0, 0, 1920, 1080), Rect::from_xywh(100, 50, 400, 300), Rect::from_xywh(100, 900, 400, 100)] {
+            let (_, p) = indicator(r, m, (big.w as i32, big.h as i32), 9);
+            if let Some(p) = p {
+                assert!(p.intersect(&r).is_none() && p.intersect(&m) == Some(p), "{r:?} {p:?}");
             }
         }
     }

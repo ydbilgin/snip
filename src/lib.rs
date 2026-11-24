@@ -14,10 +14,12 @@
 
 pub mod annotate;
 pub mod autostart;
+pub mod beautify;
 pub mod cardview;
 pub mod config;
 pub mod cursorfence;
 pub mod delay;
+pub mod demo;
 pub mod dib;
 pub mod dpi;
 pub mod editor;
@@ -32,6 +34,7 @@ pub mod hookstate;
 pub mod hotkey;
 pub mod i18n;
 pub mod icons;
+pub mod loupe;
 pub mod naming;
 pub mod pinview;
 pub mod parts;

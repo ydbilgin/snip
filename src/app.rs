@@ -577,7 +577,10 @@ impl App {
             theme: crate::sys::theme(&self.cfg),
             lang: self.lang(),
             editor: editor.then(|| {
-                Prefs::parse(&std::fs::read_to_string(paths::editor_prefs_file()).unwrap_or_default())
+                Prefs::parse_with(
+                    &std::fs::read_to_string(paths::editor_prefs_file()).unwrap_or_default(),
+                    &std::fs::read_to_string(paths::editor_extra_file()).unwrap_or_default(),
+                )
             }),
         };
         match Overlay::new(snap, self.hinst, &opts) {
@@ -709,9 +712,13 @@ impl App {
             let _ = KillTimer(Some(self.hwnd), TIMER_OVERLAY);
         }
         let ov = self.overlay.take();
-        if let Some(e) = ov.as_ref().and_then(|o| o.editor.as_ref())
-            && let Err(err) = naming::write_small(&paths::editor_prefs_file(), e.prefs().to_text().as_bytes()) {
+        if let Some(e) = ov.as_ref().and_then(|o| o.editor.as_ref()) {
+            let p = e.prefs();
+            if let Err(err) = naming::write_small(&paths::editor_prefs_file(), p.to_text().as_bytes())
+                .and_then(|_| naming::write_small(&paths::editor_extra_file(), p.extra_text().as_bytes()))
+            {
                 logf!("editor preferences save FAILED: {err}");
+            }
         }
         if ov.is_some()
             && let Some(p) = self.parent() {

@@ -15,6 +15,17 @@ use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitFo
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 pub const WM_STOP: u32 = WM_APP + 90;
+/// How the control looks and what it shows; one recording per process at a time.
+struct ControlLook {
+    theme: crate::theme::Theme,
+    scale: f32,
+    stop: &'static str,
+    elapsed_ms: u64,
+}
+static CONTROL: Mutex<Option<ControlLook>> = Mutex::new(None);
+thread_local! {
+    static GLYPHS: crate::gdi::GdiGlyphs = crate::gdi::GdiGlyphs::new();
+}
 pub const TIMER: usize = 90;
 pub enum Event {
     Published {
@@ -62,6 +73,7 @@ impl Session {
         } else {
             "Stop"
         };
+        let cfg_look = cfg.clone();
         let (tx, rx) = mpsc::channel();
         let st = state.clone();
         let flag = stop.clone();
@@ -86,6 +98,10 @@ impl Session {
                 CoUninitialize();
             }
         });
+        let scale = crate::sys::monitors().list.iter().find(|m| m.rect == monitor).map(|m| m.scale()).unwrap_or(1.0);
+        if let Ok(mut c) = CONTROL.lock() {
+            *c = Some(ControlLook { theme: crate::sys::theme(&cfg_look), scale, stop: stop_label, elapsed_ms: 0 });
+        }
         let (windows, panel) = indicators(owner, rect, monitor);
         Self {
             stop,
@@ -111,6 +127,11 @@ impl Session {
         }
         if let Some(h) = self.panel {
             let ms = self.state.lock().map(|s| s.elapsed_ms).unwrap_or(0);
+            if let Ok(mut c) = CONTROL.lock()
+                && let Some(c) = c.as_mut()
+            {
+                c.elapsed_ms = ms;
+            }
             let text = format!(
                 "{:02}:{:02}   {}",
                 ms / 60000,
@@ -120,7 +141,7 @@ impl Session {
             let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
             unsafe {
                 let _ = SetWindowTextW(h, PCWSTR(text.as_ptr()));
-                let _ = InvalidateRect(Some(h), None, true);
+                let _ = InvalidateRect(Some(h), None, false);
             }
         }
     }
@@ -419,35 +440,87 @@ unsafe extern "system" fn indicator_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: L
             unsafe {
                 let mut ps = PAINTSTRUCT::default();
                 let dc = BeginPaint(hwnd, &mut ps);
-                let mut name = [0u16; 128];
-                let n = GetWindowTextW(hwnd, &mut name);
-                SetBkMode(dc, TRANSPARENT);
-                if n > 0 {
-                    let bg = CreateSolidBrush(COLORREF(0x00222222));
-                    FillRect(dc, &ps.rcPaint, bg);
-                    let _ = DeleteObject(bg.into());
-                    let dot = CreateSolidBrush(COLORREF(0x003030ee));
-                    let previous = SelectObject(dc, dot.into());
-                    let _ = Ellipse(dc, 6, 10, 16, 20);
-                    SelectObject(dc, previous);
-                    let _ = DeleteObject(dot.into());
-                }
-                SetTextColor(dc, COLORREF(0x00ffffff));
-                let mut rect = ps.rcPaint;
-                rect.left += 18;
-                DrawTextW(
-                    dc,
-                    &mut name[..n as usize],
-                    &mut rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                );
+                paint_control(hwnd, dc);
                 let _ = EndPaint(hwnd, &ps);
             }
             LRESULT(0)
         }
+        WM_PRINTCLIENT => {
+            paint_control(hwnd, HDC(wp.0 as *mut _));
+            LRESULT(0)
+        }
+        WM_ERASEBKGND if unsafe { GetWindowTextLengthW(hwnd) } > 0 => LRESULT(1),
         _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
 }
+/// The control (the window with a caption): the core's drawing, as on the README film. The bars
+/// are the class brush and need no painting.
+fn paint_control(hwnd: HWND, dc: HDC) {
+    unsafe {
+        if GetWindowTextLengthW(hwnd) == 0 {
+            return;
+        }
+        let cv = CONTROL.lock().ok().and_then(|c| c.as_ref().map(|c| GLYPHS.with(|g| record::render_control(c.elapsed_ms, c.stop, &c.theme, c.scale, g))));
+        let Some(cv) = cv else { return };
+        let bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: cv.w as i32,
+                biHeight: -(cv.h as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        SetDIBitsToDevice(dc, 0, 0, cv.w, cv.h, 0, 0, 0, cv.h, cv.px.as_ptr() as *const _, &bi, DIB_RGB_COLORS);
+    }
+}
+
+/// The look test: the real bar and control windows around `rect` on `monitor`, the control printed
+/// to pixels, then all of them destroyed. Hidden desktop only (the caller checks).
+pub fn look_indicator(t: crate::theme::Theme, scale: f32, stop: &'static str, elapsed_ms: u64, rect: Rect, monitor: Rect) -> Option<(Rect, crate::raster::Canvas)> {
+    if let Ok(mut c) = CONTROL.lock() {
+        *c = Some(ControlLook { theme: t, scale, stop, elapsed_ms });
+    }
+    let (windows, panel) = indicators(HWND::default(), rect, monitor);
+    let out = panel.and_then(|h| {
+        let r = crate::overlay::window_rect(h);
+        unsafe {
+            let screen = GetDC(None);
+            let mem = CreateCompatibleDC(Some(screen));
+            let bm = CreateCompatibleBitmap(screen, r.width(), r.height());
+            let old = SelectObject(mem, bm.into());
+            // Flag 0: WM_PRINT, so the window paints itself through WM_PRINTCLIENT.
+            let ok = windows::Win32::Storage::Xps::PrintWindow(h, mem, windows::Win32::Storage::Xps::PRINT_WINDOW_FLAGS(0)).as_bool();
+            let mut px = vec![0u8; (r.width() * r.height() * 4) as usize];
+            let mut bi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: r.width(), biHeight: -r.height(), biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+                ..Default::default()
+            };
+            GetDIBits(mem, bm, 0, r.height() as u32, Some(px.as_mut_ptr() as *mut _), &mut bi, DIB_RGB_COLORS);
+            SelectObject(mem, old);
+            let _ = DeleteObject(bm.into());
+            let _ = DeleteDC(mem);
+            ReleaseDC(None, screen);
+            for p in px.as_chunks_mut::<4>().0 {
+                p[3] = 255;
+            }
+            ok.then(|| (r, crate::raster::Canvas::from_bgra(r.width() as u32, r.height() as u32, px)))
+        }
+    });
+    for h in windows {
+        unsafe {
+            let _ = DestroyWindow(h);
+        }
+    }
+    if let Ok(mut c) = CONTROL.lock() {
+        *c = None;
+    }
+    out
+}
+
 fn indicators(owner: HWND, rect: Rect, monitor: Rect) -> (Vec<HWND>, Option<HWND>) {
     unsafe {
         let Ok(module) = GetModuleHandleW(None) else {
@@ -462,7 +535,14 @@ fn indicators(owner: HWND, rect: Rect, monitor: Rect) -> (Vec<HWND>, Option<HWND
             hbrBackground: brush,
             ..Default::default()
         });
-        let (bars, panel) = record::indicator(rect, monitor);
+        let size = CONTROL
+            .lock()
+            .ok()
+            .and_then(|c| c.as_ref().map(|c| GLYPHS.with(|g| record::render_control(0, c.stop, &c.theme, c.scale, g))))
+            .map(|cv| (cv.w as i32, cv.h as i32))
+            .unwrap_or((180, 30));
+        let gap = CONTROL.lock().ok().and_then(|c| c.as_ref().map(|c| (crate::theme::SELECTION_LABEL_GAP * c.scale).round() as i32)).unwrap_or(6);
+        let (bars, panel) = record::indicator(rect, monitor, size, gap);
         let mut windows = Vec::new();
         let mut control = None;
         for (r, is_panel) in bars
